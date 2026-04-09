@@ -6,6 +6,7 @@ import { executeTask, getActiveTaskCount, cancelTask } from './runner.js';
 import { collectPongPayload } from './health.js';
 import { startNatsHeartbeat } from './nats-heartbeat.js';
 import { FileSync } from './sync.js';
+import { GitSync } from './git-sync.js';
 import { logger } from './logger.js';
 import type { WsEnvelope, TaskCreatedPayload, MessageNewPayload, DiscussionYourTurnPayload, DiscussionSoloAnalyzePayload } from '@boardroom/shared';
 import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type FleetTaskCancel, type NodeId } from '@boardroom/shared';
@@ -14,7 +15,7 @@ const conn = new Connection();
 const discussant = new Discussant(conn);
 
 let nc: NatsConnection | null = null;
-let fileSync: FileSync | null = null;
+let fileSync: FileSync | GitSync | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 
 // --- NATS task handler ---
@@ -163,20 +164,37 @@ async function initNats(): Promise<void> {
     // Start heartbeat
     heartbeatTimer = startNatsHeartbeat(nc, config.agentId as NodeId, getActiveTaskCount);
 
-    // Initialize FileSync
-    fileSync = new FileSync(
-      {
-        syncRoot: config.syncRoot,
-        hubSsh: config.hubSsh,
-        hubPathPrefix: config.hubPathPrefix,
-        isHub: config.isHub,
-        retries: config.syncRetries,
-        timeoutSec: config.syncTimeoutSec,
-        extraFlags: config.syncExtraFlags,
-      },
-      nc,
-      config.agentId as NodeId,
-    );
+    // Initialize file sync (git mode = no SSH, rsync mode = legacy)
+    if (config.syncMode === 'git') {
+      fileSync = new GitSync(
+        {
+          syncRoot: config.syncRoot,
+          remoteBase: config.gitRemoteBase,
+          hubPathPrefix: config.hubPathPrefix,
+          isHub: config.isHub,
+          timeoutSec: config.syncTimeoutSec,
+          branch: config.gitBranch,
+        },
+        nc,
+        config.agentId as NodeId,
+      );
+      logger.info(`[sync] Using git-based sync (no SSH)`);
+    } else {
+      fileSync = new FileSync(
+        {
+          syncRoot: config.syncRoot,
+          hubSsh: config.hubSsh,
+          hubPathPrefix: config.hubPathPrefix,
+          isHub: config.isHub,
+          retries: config.syncRetries,
+          timeoutSec: config.syncTimeoutSec,
+          extraFlags: config.syncExtraFlags,
+        },
+        nc,
+        config.agentId as NodeId,
+      );
+      logger.info(`[sync] Using rsync-based sync (SSH required)`);
+    }
 
     // Subscribe to task dispatches for this node
     const taskSub = nc.subscribe(FLEET_SUBJECTS.taskDispatch(config.agentId as NodeId));

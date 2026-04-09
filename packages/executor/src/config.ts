@@ -30,9 +30,18 @@ export const config = {
   natsToken: process.env['FLEET_NATS_TOKEN'] ?? '',
   natsEnabled: process.env['FLEET_NATS_ENABLED'] !== 'false',
 
-  // FileSync — rsync between hub (ASUS) and workers
-  syncRoot: process.env['FLEET_SYNC_ROOT'] ?? '/mnt/c/fleet-work',
+  // FileSync — mode selection
+  syncMode: (process.env['FLEET_SYNC_MODE'] ?? 'git') as 'git' | 'rsync',
+
+  // Git sync (default — no SSH needed)
+  gitRemoteBase: process.env['FLEET_GIT_REMOTE_BASE'] ?? '',
+  gitBranch: process.env['FLEET_GIT_BRANCH'] ?? 'main',
+
+  // Rsync sync (legacy — requires SSH)
   hubSsh: process.env['FLEET_HUB_SSH'] ?? 'pc1',
+
+  // Shared sync config
+  syncRoot: process.env['FLEET_SYNC_ROOT'] ?? '/mnt/c/fleet-work',
   hubPathPrefix: process.env['FLEET_HUB_PATH_PREFIX'] ?? '/mnt/d/AI/',
   isHub: process.env['FLEET_IS_HUB'] === 'true',
   syncRetries: parseInt(process.env['FLEET_SYNC_RETRIES'] ?? '3', 10),
