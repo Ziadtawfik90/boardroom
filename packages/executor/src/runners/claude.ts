@@ -92,17 +92,36 @@ export async function runClaude(
   });
 
   const workDir = overrideWorkDir || process.env['WORK_DIR'] || process.cwd();
-  // Resolve claude binary — check common locations
-  const claudeBin = process.env['CLAUDE_BIN'] || (
-    process.platform === 'win32'
-      ? `${process.env['APPDATA'] ?? 'C:\\Users\\' + (process.env['USERNAME'] ?? 'user') + '\\AppData\\Roaming'}\\npm\\claude.cmd`
-      : 'claude'
-  );
-  logger.info(`Spawning Claude Code CLI: ${claudeBin} (cwd: ${workDir})`);
+  // Resolve claude binary
+  let claudeCmd: string;
+  let claudeArgs: string[];
+
+  if (process.platform === 'win32') {
+    // On Windows, find the claude JS entry point and run via node directly
+    // This avoids needing cmd.exe / shell which may not be available in service contexts
+    const appData = process.env['APPDATA'] ?? `C:\\Users\\${process.env['USERNAME'] ?? 'user'}\\AppData\\Roaming`;
+    const npmDir = `${appData}\\npm`;
+    const nodeModulesDir = `${npmDir}\\node_modules\\@anthropic-ai\\claude-code`;
+    const { existsSync } = require('node:fs');
+    const cliPath = `${nodeModulesDir}\\cli.mjs`;
+
+    if (existsSync(cliPath)) {
+      claudeCmd = process.execPath; // node.exe
+      claudeArgs = [cliPath, '-p', '--dangerously-skip-permissions'];
+    } else {
+      // Fallback: try claude.cmd with shell
+      claudeCmd = `${npmDir}\\claude.cmd`;
+      claudeArgs = ['-p', '--dangerously-skip-permissions'];
+    }
+  } else {
+    claudeCmd = process.env['CLAUDE_BIN'] || 'claude';
+    claudeArgs = ['-p', '--dangerously-skip-permissions'];
+  }
+
+  logger.info(`Spawning Claude Code CLI: ${claudeCmd} ${claudeArgs[0]} (cwd: ${workDir})`);
 
   return new Promise((resolve) => {
-    // Pipe prompt via stdin — no escaping issues
-    const child = spawn(claudeBin, ['-p', '--dangerously-skip-permissions'], {
+    const child = spawn(claudeCmd, claudeArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: workDir,
       env: {

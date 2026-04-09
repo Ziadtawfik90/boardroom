@@ -110,14 +110,28 @@ export class Discussant {
 
   private callClaudeCli(prompt: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const claudeBin = process.env['CLAUDE_BIN'] || (
-        process.platform === 'win32'
-          ? `${process.env['APPDATA'] ?? 'C:\\Users\\' + (process.env['USERNAME'] ?? 'user') + '\\AppData\\Roaming'}\\npm\\claude.cmd`
-          : 'claude'
-      );
-      const child = spawn(claudeBin, ['--dangerously-skip-permissions'], {
+      let claudeCmd: string;
+      let claudeArgs: string[];
+
+      if (process.platform === 'win32') {
+        const appData = process.env['APPDATA'] ?? `C:\\Users\\${process.env['USERNAME'] ?? 'user'}\\AppData\\Roaming`;
+        const cliPath = `${appData}\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.mjs`;
+        const { existsSync } = require('node:fs');
+        if (existsSync(cliPath)) {
+          claudeCmd = process.execPath;
+          claudeArgs = [cliPath, '--dangerously-skip-permissions'];
+        } else {
+          claudeCmd = `${appData}\\npm\\claude.cmd`;
+          claudeArgs = ['--dangerously-skip-permissions'];
+        }
+      } else {
+        claudeCmd = process.env['CLAUDE_BIN'] || 'claude';
+        claudeArgs = ['--dangerously-skip-permissions'];
+      }
+
+      const child = spawn(claudeCmd, claudeArgs, {
         timeout: 90_000,
-        shell: true,
+        shell: process.platform !== 'win32',
         env: {
           ...process.env,
           TERM: 'dumb',

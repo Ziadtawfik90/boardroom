@@ -56,9 +56,23 @@ async function handleNatsTask(task: FleetTaskDispatch): Promise<void> {
       workDir = await fileSync.pullFromHub(task.taskId, task.workDir);
       logger.info(`[sync] Pulled workspace: ${task.workDir} → ${workDir}`);
     } catch (err) {
-      logger.error(`[sync] Pull failed, using direct path: ${(err as Error).message}`);
-      // Fall through — try executing with the original path
+      logger.error(`[sync] Pull failed: ${(err as Error).message}`);
+      // On Windows, Linux paths don't exist — use a local fallback
+      if (process.platform === 'win32' || !require('node:fs').existsSync(workDir)) {
+        const fallback = process.platform === 'win32'
+          ? require('node:path').join(config.syncRoot, task.taskId)
+          : workDir;
+        try { require('node:fs').mkdirSync(fallback, { recursive: true }); } catch {}
+        workDir = fallback;
+        logger.info(`[sync] Using local fallback workdir: ${workDir}`);
+      }
     }
+  } else if (process.platform === 'win32' && workDir.startsWith('/')) {
+    // No fileSync but got a Linux path on Windows — use local dir
+    const fallback = require('node:path').join(process.cwd(), 'work', task.taskId);
+    try { require('node:fs').mkdirSync(fallback, { recursive: true }); } catch {}
+    workDir = fallback;
+    logger.info(`[sync] No sync, using local workdir: ${workDir}`);
   }
 
   const startTime = Date.now();
