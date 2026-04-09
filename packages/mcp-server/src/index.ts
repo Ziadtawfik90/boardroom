@@ -418,6 +418,104 @@ ${roundInstruction}`;
   },
 );
 
+// Tool: Dispatch a task to the fleet via the Boardroom server REST API
+server.tool(
+  'dispatch',
+  'Dispatch a task to the Boardroom fleet. Auto-routes to the best available agent if no target specified.',
+  {
+    prompt: z.string().describe('The task prompt for the agent'),
+    workDir: z.string().optional().describe('Working directory for the task (default: current)'),
+    targetAgent: z.enum(['asus', 'water', 'steam', 'auto']).optional().describe('Target agent (default: auto-route)'),
+  },
+  async ({ prompt, workDir, targetAgent }: { prompt: string; workDir?: string; targetAgent?: string }) => {
+    const serverUrl = process.env['BOARDROOM_SERVER_URL'] ?? 'http://localhost:3101';
+    const apiKey = process.env['ADMIN_API_KEY'] ?? 'admin-dev-key';
+
+    try {
+      // Login
+      const loginRes = await fetch(`${serverUrl}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey }),
+      });
+      if (!loginRes.ok) throw new Error(`Login failed: ${loginRes.status}`);
+      const { token } = await loginRes.json() as { token: string };
+
+      // Create task
+      const taskRes = await fetch(`${serverUrl}/api/v1/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          title: prompt.slice(0, 100),
+          description: prompt,
+          assignee: targetAgent === 'auto' ? undefined : (targetAgent ?? undefined),
+          type: 'simple',
+          priority: 5,
+          autoApprove: true,
+        }),
+      });
+
+      if (!taskRes.ok) {
+        const body = await taskRes.text();
+        throw new Error(`Task creation failed (${taskRes.status}): ${body}`);
+      }
+
+      const task = await taskRes.json() as { id: string; assignee: string; status: string };
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Task dispatched: ${task.id}\nAssignee: ${task.assignee}\nStatus: ${task.status}`,
+        }],
+      };
+    } catch (err) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Dispatch failed: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// Tool: Fleet status — show all nodes health from NATS
+server.tool(
+  'fleet_status',
+  'Show the health status of all fleet nodes including CPU, RAM, GPU usage and active tasks.',
+  {},
+  async () => {
+    // Uses the existing 'status' logic but adds fleet-specific data
+    const results = await Promise.allSettled(
+      PCS.map(async (pc) => {
+        try {
+          const cmd = pc.sshAlias
+            ? 'hostname && nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo "no-gpu"'
+            : 'hostname && nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo "no-gpu"';
+          const result = await runOnPC(pc, cmd, 10_000);
+          const lines = result.stdout.split('\n');
+          return {
+            id: pc.id,
+            name: pc.name,
+            role: pc.role,
+            status: 'online' as const,
+            hostname: lines[0] || 'unknown',
+            gpu: lines[1] !== 'no-gpu' ? lines[1] : pc.gpu,
+          };
+        } catch {
+          return { id: pc.id, name: pc.name, role: pc.role, status: 'offline' as const, hostname: '', gpu: '' };
+        }
+      }),
+    );
+
+    const statuses = results.map((r) => r.status === 'fulfilled' ? r.value : { status: 'error' });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(statuses, null, 2) }] };
+  },
+);
+
 // --- Start ---
 
 async function main() {

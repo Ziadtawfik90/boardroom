@@ -252,6 +252,9 @@ export class Queries {
       failTask: this.db.prepare<[string, string]>(
         'UPDATE tasks SET status = \'failed\', error = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?',
       ),
+      reassignTask: this.db.prepare<[string, string]>(
+        'UPDATE tasks SET assignee = ?, status = \'approved\', started_at = NULL WHERE id = ?',
+      ),
 
       // Task logs
       getTaskLogs: this.db.prepare<[string]>(
@@ -444,6 +447,10 @@ export class Queries {
 
   failTask(id: string, error: string): void {
     this.stmts.failTask.run(error, id);
+  }
+
+  reassignTask(id: string, newAssignee: string): void {
+    this.stmts.reassignTask.run(newAssignee, id);
   }
 
   // ---------- Task logs ----------

@@ -1,10 +1,11 @@
+import type { NatsConnection } from 'nats';
 import type { Task } from '../../../shared/src/types.js';
 import { createEnvelope } from '../../../shared/src/protocol.js';
 import type { AgentRegistry } from '../agent/registry.js';
 import type { Queries } from '../db/queries.js';
 import type { DiscussionManager } from '../discussion/manager.js';
-import { executeTaskViaSsh } from './ssh-runner.js';
 import type { WorkspaceManager } from '../workspace/manager.js';
+import { FLEET_SUBJECTS, type FleetTaskDispatch, type NodeId } from '../../../shared/src/fleet-types.js';
 
 type BroadcastFn = (envelope: import('../../../shared/src/protocol.js').WsEnvelope) => void;
 
@@ -12,6 +13,7 @@ export class TaskDispatcher {
   private broadcast: BroadcastFn | null = null;
   private discussionManager: DiscussionManager | null = null;
   private workspaceManager: WorkspaceManager | null = null;
+  private nc: NatsConnection | null = null;
 
   constructor(
     private registry: AgentRegistry,
@@ -30,110 +32,129 @@ export class TaskDispatcher {
     this.workspaceManager = wm;
   }
 
+  setNats(nc: NatsConnection): void {
+    this.nc = nc;
+  }
+
   dispatch(task: Task): boolean {
-    // Try WebSocket first (executor connected)
+    // Auto-route if assignee is 'auto' or empty
+    if (!task.assignee || task.assignee === ('auto' as any)) {
+      const selectedAgent = this.autoRoute(task);
+      if (!selectedAgent) {
+        console.log(`[dispatcher] No agents available for auto-routing task ${task.id}`);
+        this.queries.insertTaskLog(task.id, 'warn', 'No agents available for auto-routing');
+        return false;
+      }
+      this.queries.reassignTask(task.id, selectedAgent);
+      task = { ...task, assignee: selectedAgent as any };
+      console.log(`[dispatcher] Auto-routed task ${task.id} → ${selectedAgent}`);
+    }
+
+    // Try NATS first (reliable, survives disconnects)
+    const natsDispatched = this.dispatchViaNats(task);
+
+    // Also try WebSocket as fast-path (if executor is connected)
     const ws = this.registry.getConnection(task.assignee);
     if (ws && ws.readyState === 1) {
       const envelope = createEnvelope('task.created', { task }, 'system');
       ws.send(JSON.stringify(envelope));
       console.log(`[dispatcher] Sent task ${task.id} to ${task.assignee} via WebSocket`);
+    }
+
+    if (natsDispatched) {
+      this.queries.audit('system', 'dispatch-nats', 'task', task.id, { assignee: task.assignee });
+      return true;
+    }
+
+    if (ws && ws.readyState === 1) {
       this.queries.audit('system', 'dispatch-ws', 'task', task.id, { assignee: task.assignee });
       return true;
     }
 
-    // Verify the agent's PC is reachable before SSH fallback
-    // Refuse to dispatch if agent is offline — prevents all tasks running on asus
+    // Neither NATS nor WS available — check if agent is offline
     const agent = this.queries.getAgent(task.assignee);
     if (agent && agent.status === 'offline') {
-      const error = `Agent ${task.assignee} is offline — refusing to dispatch. Each agent must run on its own PC.`;
+      const error = `Agent ${task.assignee} is offline and unreachable via NATS — task remains pending.`;
       console.log(`[dispatcher] ${error}`);
-      this.queries.failTask(task.id, error);
-      if (this.broadcast) {
-        this.broadcast(createEnvelope('task.failed', { taskId: task.id, error }, 'system'));
-      }
+      this.queries.insertTaskLog(task.id, 'warn', error);
       return false;
     }
 
-    // Fallback: execute via SSH on the agent's own PC
-    console.log(`[dispatcher] Agent ${task.assignee} not connected via WebSocket, using SSH fallback`);
-    this.dispatchViaSsh(task);
-    return true;
+    // Agent exists but neither transport worked
+    console.log(`[dispatcher] No transport available for ${task.assignee}, task ${task.id} remains pending`);
+    return false;
   }
 
-  /** Execute task via SSH — runs async, reports result when done */
-  private async dispatchViaSsh(task: Task): Promise<void> {
-    // Mark task as running
-    this.queries.startTask(task.id);
-    this.queries.updateAgentStatus(task.assignee, 'busy');
-    this.queries.audit('system', 'dispatch-ssh', 'task', task.id, { assignee: task.assignee });
+  /** Auto-route: pick best agent based on workDir, capabilities, and load */
+  private autoRoute(task: Task): string | null {
+    // File-partition rules: route based on workDir
+    const FILE_PARTITIONS: { prefix: string; preferred: NodeId }[] = [
+      { prefix: '/mnt/d/AI/projects/marketingai', preferred: 'water' },
+      { prefix: '/mnt/d/AI/brain', preferred: 'steam' },
+    ];
 
-    // Broadcast that task is running
-    if (this.broadcast) {
-      this.broadcast(createEnvelope('task.accepted', { taskId: task.id }, task.assignee));
+    const workDir = this.workspaceManager?.get(task.discussionId ?? '')?.path ?? '';
+
+    // Check file-partition preferences
+    const onlineAgents = this.queries.getAllAgents().filter((a) => a.status !== 'offline');
+    if (onlineAgents.length === 0) return null;
+
+    const onlineIds = new Set(onlineAgents.map((a) => a.id));
+
+    for (const partition of FILE_PARTITIONS) {
+      if (workDir.startsWith(partition.prefix) && onlineIds.has(partition.preferred)) {
+        return partition.preferred;
+      }
     }
 
-    try {
-      const result = await executeTaskViaSsh(task, this.queries, this.workspaceManager ?? undefined);
+    // Fallback: pick least-loaded online agent
+    let bestAgent = onlineAgents[0].id;
+    let bestLoad = Infinity;
 
-      if (result.success) {
-        // Mark done
-        this.queries.completeTask(task.id, { output: result.output, exitCode: result.exitCode });
-        this.queries.insertTaskLog(task.id, 'info', 'Task completed via SSH');
-        this.queries.updateAgentStatus(task.assignee, 'online');
-
-        console.log(`[dispatcher] SSH task ${task.id} completed on ${task.assignee}`);
-
-        // Broadcast completion
-        if (this.broadcast) {
-          this.broadcast(createEnvelope('task.completed', { taskId: task.id, result: { output: result.output } }, task.assignee));
-        }
-
-        // Post result to discussion
-        if (task.discussionId && this.discussionManager) {
-          const msg = this.discussionManager.addMessage(
-            task.discussionId,
-            task.assignee,
-            `Task "${task.title}" completed.\n\n${result.output.substring(0, 500)}`,
-            'action',
-            null,
-            { taskId: task.id, result: { output: result.output.substring(0, 1000) } },
-          );
-          if (this.broadcast) {
-            this.broadcast(createEnvelope('message.new', { discussionId: task.discussionId, message: msg }, 'system'));
-          }
-        }
-      } else {
-        // Mark failed
-        const error = result.output || `SSH execution failed (exit code ${result.exitCode})`;
-        this.queries.failTask(task.id, error);
-        this.queries.insertTaskLog(task.id, 'error', error);
-        this.queries.updateAgentStatus(task.assignee, 'online');
-
-        console.log(`[dispatcher] SSH task ${task.id} failed on ${task.assignee}: ${error.substring(0, 100)}`);
-
-        if (this.broadcast) {
-          this.broadcast(createEnvelope('task.failed', { taskId: task.id, error }, task.assignee));
-        }
-
-        if (task.discussionId && this.discussionManager) {
-          const msg = this.discussionManager.addMessage(
-            task.discussionId,
-            task.assignee,
-            `Task "${task.title}" failed: ${error.substring(0, 300)}`,
-            'system',
-            null,
-            { taskId: task.id, error },
-          );
-          if (this.broadcast) {
-            this.broadcast(createEnvelope('message.new', { discussionId: task.discussionId, message: msg }, 'system'));
-          }
-        }
+    for (const agent of onlineAgents) {
+      const health = this.registry.getHealth(agent.id);
+      const load = health?.taskCount ?? 0;
+      if (load < bestLoad) {
+        bestLoad = load;
+        bestAgent = agent.id;
       }
+    }
+
+    return bestAgent;
+  }
+
+  /** Dispatch task via NATS pub/sub */
+  private dispatchViaNats(task: Task): boolean {
+    if (!this.nc) return false;
+
+    const nodeId = task.assignee as NodeId;
+    const fleetTask: FleetTaskDispatch = {
+      type: 'task.dispatch',
+      taskId: task.id,
+      nodeId,
+      prompt: task.description ?? task.title,
+      workDir: this.workspaceManager?.get(task.discussionId ?? '')?.path ?? process.cwd(),
+      files: [],
+      timeout: 300_000,
+      priority: task.priority,
+      metadata: {
+        discussionId: task.discussionId ?? '',
+        title: task.title,
+        type: task.type,
+      },
+      dispatchedAt: new Date().toISOString(),
+    };
+
+    try {
+      this.nc.publish(
+        FLEET_SUBJECTS.taskDispatch(nodeId),
+        new TextEncoder().encode(JSON.stringify(fleetTask)),
+      );
+      console.log(`[dispatcher] Published task ${task.id} to NATS → ${nodeId}`);
+      return true;
     } catch (err) {
-      const error = (err as Error).message;
-      this.queries.failTask(task.id, error);
-      this.queries.updateAgentStatus(task.assignee, 'online');
-      console.error(`[dispatcher] SSH task ${task.id} error:`, error);
+      console.error(`[dispatcher] NATS publish failed for task ${task.id}:`, (err as Error).message);
+      return false;
     }
   }
 
@@ -177,6 +198,61 @@ export class TaskDispatcher {
     const tasks = this.queries.listTasks({ status: 'approved', assignee: agentId });
     for (const task of tasks) {
       this.dispatchIfReady(task);
+    }
+  }
+
+  /** Requeue running tasks from a dead agent to another online agent */
+  requeueDeadNodeTasks(deadAgentId: string): void {
+    const runningTasks = this.queries.listTasks({ status: 'running', assignee: deadAgentId });
+    const approvedTasks = this.queries.listTasks({ status: 'approved', assignee: deadAgentId });
+    const tasksToRequeue = [...runningTasks, ...approvedTasks];
+
+    if (tasksToRequeue.length === 0) return;
+
+    // Find another online agent
+    const onlineAgents = this.registry.getConnectedIds().filter((id) => id !== deadAgentId);
+
+    for (const task of tasksToRequeue) {
+      if (onlineAgents.length === 0) {
+        const error = `Agent ${deadAgentId} died and no other agents online — task ${task.id} failed`;
+        this.queries.failTask(task.id, error);
+        this.queries.insertTaskLog(task.id, 'error', error);
+        console.log(`[dispatcher] ${error}`);
+
+        if (this.broadcast) {
+          this.broadcast(createEnvelope('task.failed', { taskId: task.id, error }, 'system'));
+        }
+        continue;
+      }
+
+      // Pick least-loaded online agent
+      const newAssignee = onlineAgents[0]; // Simple: first available
+      console.log(`[dispatcher] Requeuing task ${task.id}: ${deadAgentId} → ${newAssignee}`);
+
+      this.queries.insertTaskLog(task.id, 'warn', `Requeued from dead agent ${deadAgentId} to ${newAssignee}`);
+
+      // Update task assignee in DB and re-dispatch
+      this.queries.reassignTask(task.id, newAssignee);
+
+      const updatedTask = this.queries.getTask(task.id);
+      if (updatedTask) {
+        this.dispatch(updatedTask);
+      }
+
+      // Publish requeue event to NATS
+      if (this.nc) {
+        const requeue = {
+          type: 'task.requeue',
+          taskId: task.id,
+          originalNode: deadAgentId,
+          reason: 'node_dead',
+          requeuedAt: new Date().toISOString(),
+        };
+        this.nc.publish(
+          FLEET_SUBJECTS.taskRequeue,
+          new TextEncoder().encode(JSON.stringify(requeue)),
+        );
+      }
     }
   }
 }

@@ -1,15 +1,203 @@
+import { connect, type NatsConnection } from 'nats';
 import { config } from './config.js';
 import { Connection } from './connection.js';
 import { Discussant } from './discussant.js';
 import { executeTask, getActiveTaskCount } from './runner.js';
 import { collectPongPayload } from './health.js';
+import { startNatsHeartbeat } from './nats-heartbeat.js';
+import { FileSync } from './sync.js';
 import { logger } from './logger.js';
 import type { WsEnvelope, TaskCreatedPayload, MessageNewPayload, DiscussionYourTurnPayload, DiscussionSoloAnalyzePayload } from '@boardroom/shared';
+import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type NodeId } from '@boardroom/shared';
 
 const conn = new Connection();
 const discussant = new Discussant(conn);
 
-// --- Message handler ---
+let nc: NatsConnection | null = null;
+let fileSync: FileSync | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
+
+// --- NATS task handler ---
+
+async function handleNatsTask(task: FleetTaskDispatch): Promise<void> {
+  if (task.nodeId !== config.agentId) return;
+  if (getActiveTaskCount() >= config.maxConcurrentTasks) {
+    logger.warn(`At capacity (${config.maxConcurrentTasks}), ignoring NATS task ${task.taskId}`);
+    return;
+  }
+
+  logger.info(`[NATS] Received task: ${task.taskId} - ${task.prompt.slice(0, 80)}...`);
+
+  // Send accepted via NATS
+  if (nc) {
+    const accepted: FleetTaskAccepted = {
+      type: 'task.accepted',
+      taskId: task.taskId,
+      nodeId: config.agentId as NodeId,
+      pid: process.pid,
+      acceptedAt: new Date().toISOString(),
+    };
+    nc.publish(
+      FLEET_SUBJECTS.taskAccepted(config.agentId as NodeId),
+      new TextEncoder().encode(JSON.stringify(accepted)),
+    );
+  }
+
+  // Also accept via WS if connected
+  if (conn.isConnected) {
+    conn.send('task.accepted', { taskId: task.taskId });
+  }
+
+  // File sync: pull from hub before execution
+  let workDir = task.workDir;
+  if (fileSync) {
+    try {
+      workDir = await fileSync.pullFromHub(task.taskId, task.workDir);
+      logger.info(`[sync] Pulled workspace: ${task.workDir} → ${workDir}`);
+    } catch (err) {
+      logger.error(`[sync] Pull failed, using direct path: ${(err as Error).message}`);
+      // Fall through — try executing with the original path
+    }
+  }
+
+  const startTime = Date.now();
+
+  try {
+    // Build a task-like object for executeTask
+    const boardroomTask = {
+      id: task.taskId,
+      discussionId: task.metadata.discussionId || null,
+      title: task.metadata.title || task.prompt.slice(0, 100),
+      description: task.prompt,
+      assignee: config.agentId,
+      status: 'running' as const,
+      type: (task.metadata.type || 'simple') as 'simple' | 'complex',
+      priority: task.priority,
+      dependencies: [],
+      risk: 'low' as const,
+      result: null,
+      error: null,
+      progress: 0,
+      approvedBy: null,
+      createdAt: task.dispatchedAt,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+
+    // Execute the task using existing runner
+    await executeTask(boardroomTask, conn, workDir);
+
+    // File sync: push results back to hub
+    let filesChanged: string[] = [];
+    if (fileSync && workDir !== task.workDir) {
+      filesChanged = await fileSync.pushToHub(task.taskId, workDir, task.workDir);
+      logger.info(`[sync] Pushed ${filesChanged.length} files back to hub`);
+    }
+
+    // Report result via NATS
+    if (nc) {
+      const result: FleetTaskResult = {
+        type: 'task.result',
+        taskId: task.taskId,
+        nodeId: config.agentId as NodeId,
+        status: 'completed',
+        exitCode: 0,
+        filesChanged,
+        durationMs: Date.now() - startTime,
+        completedAt: new Date().toISOString(),
+      };
+      nc.publish(
+        FLEET_SUBJECTS.taskResult(config.agentId as NodeId),
+        new TextEncoder().encode(JSON.stringify(result)),
+      );
+    }
+  } catch (err) {
+    const error = (err as Error).message;
+    logger.error(`[NATS] Task ${task.taskId} failed:`, error);
+
+    if (nc) {
+      const result: FleetTaskResult = {
+        type: 'task.result',
+        taskId: task.taskId,
+        nodeId: config.agentId as NodeId,
+        status: 'failed',
+        exitCode: 1,
+        filesChanged: [],
+        durationMs: Date.now() - startTime,
+        error,
+        completedAt: new Date().toISOString(),
+      };
+      nc.publish(
+        FLEET_SUBJECTS.taskResult(config.agentId as NodeId),
+        new TextEncoder().encode(JSON.stringify(result)),
+      );
+    }
+  }
+}
+
+// --- Initialize NATS ---
+
+async function initNats(): Promise<void> {
+  if (!config.natsEnabled) {
+    logger.info('NATS disabled (FLEET_NATS_ENABLED=false)');
+    return;
+  }
+
+  try {
+    nc = await connect({
+      servers: config.natsUrl,
+      name: `boardroom-executor-${config.agentId}`,
+      reconnect: true,
+      maxReconnectAttempts: -1,
+      reconnectTimeWait: 2_000,
+    });
+
+    logger.info(`[NATS] Connected to ${nc.getServer()}`);
+
+    // Start heartbeat
+    heartbeatTimer = startNatsHeartbeat(nc, config.agentId as NodeId, getActiveTaskCount);
+
+    // Initialize FileSync
+    fileSync = new FileSync(
+      {
+        syncRoot: config.syncRoot,
+        hubSsh: config.hubSsh,
+        hubPathPrefix: config.hubPathPrefix,
+        isHub: config.isHub,
+        retries: config.syncRetries,
+        timeoutSec: config.syncTimeoutSec,
+        extraFlags: config.syncExtraFlags,
+      },
+      nc,
+      config.agentId as NodeId,
+    );
+
+    // Subscribe to task dispatches for this node
+    const taskSub = nc.subscribe(FLEET_SUBJECTS.taskDispatch(config.agentId as NodeId));
+    logger.info(`[NATS] Listening for tasks on ${FLEET_SUBJECTS.taskDispatch(config.agentId as NodeId)}`);
+
+    (async () => {
+      for await (const msg of taskSub) {
+        try {
+          const task = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskDispatch;
+          if (task.type !== 'task.dispatch') continue;
+          handleNatsTask(task).catch((err) => {
+            logger.error(`[NATS] Unhandled error in task execution:`, err);
+          });
+        } catch (err) {
+          logger.error('[NATS] Failed to parse task message:', err);
+        }
+      }
+    })();
+
+    logger.info('[NATS] Fleet systems online (heartbeat, sync, task-sub)');
+  } catch (err) {
+    logger.warn(`[NATS] Failed to connect to ${config.natsUrl}: ${(err as Error).message}`);
+    logger.warn('[NATS] Running in WebSocket-only mode');
+  }
+}
+
+// --- WebSocket message handler ---
 
 conn.on('message', async (envelope: WsEnvelope) => {
   switch (envelope.type) {
@@ -23,7 +211,14 @@ conn.on('message', async (envelope: WsEnvelope) => {
       const payload = envelope.payload as TaskCreatedPayload;
       const task = payload.task;
       if (task.assignee !== config.agentId) break;
-      logger.info(`Received task: ${task.id} - ${task.title}`);
+
+      // Skip if already handling via NATS
+      if (getActiveTaskCount() >= config.maxConcurrentTasks) {
+        logger.warn(`At capacity, ignoring WS task ${task.id}`);
+        break;
+      }
+
+      logger.info(`Received task via WS: ${task.id} - ${task.title}`);
       executeTask(task, conn).catch((err) => {
         logger.error(`Unhandled error in task execution: ${task.id}`, err);
       });
@@ -33,7 +228,6 @@ conn.on('message', async (envelope: WsEnvelope) => {
     case 'message.new': {
       const payload = envelope.payload as MessageNewPayload;
       const msg = payload.message;
-      // Track all messages for context (don't respond — wait for your turn)
       discussant.addMessage(msg.sender, msg.content);
       break;
     }
@@ -73,9 +267,13 @@ conn.on('disconnected', () => {
 
 // --- Graceful shutdown ---
 
-function shutdown(signal: string): void {
+async function shutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal}, shutting down...`);
   conn.disconnect();
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (nc) {
+    try { await nc.drain(); } catch { /* ignore */ }
+  }
   process.exit(0);
 }
 
@@ -86,3 +284,6 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 logger.info(`Boardroom Executor starting: agent=${config.agentId} server=${config.serverUrl}`);
 conn.connect();
+initNats().catch((err) => {
+  logger.error('Failed to initialize NATS:', err);
+});

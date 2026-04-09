@@ -47,4 +47,8 @@ export const config = {
   workspacePath: process.env.WORKSPACE_PATH ?? '/mnt/d/AI/brain/projects',
   remoteWorkspaceBase: process.env.REMOTE_WORKSPACE_BASE ?? 'D:\\boardroom',
   autonomousRounds: process.env.AUTONOMOUS_ROUNDS !== 'false',
+
+  // NATS — fleet task distribution
+  natsUrl: process.env.NATS_URL ?? 'nats://localhost:4222',
+  natsEnabled: process.env.NATS_ENABLED !== 'false',
 } as const;

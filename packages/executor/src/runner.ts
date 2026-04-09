@@ -31,7 +31,7 @@ function detectRunner(task: Task): RunnerType {
   return 'claude';
 }
 
-export async function executeTask(task: Task, conn: Connection): Promise<void> {
+export async function executeTask(task: Task, conn: Connection, workDir?: string): Promise<void> {
   if (activeTasks.has(task.id)) {
     logger.warn(`Task ${task.id} is already running, skipping`);
     return;
@@ -58,7 +58,7 @@ export async function executeTask(task: Task, conn: Connection): Promise<void> {
             progress: progressPct,
             log: chunk.slice(0, 500),
           });
-        }, task.title, task.discussionId ?? undefined);
+        }, task.title, task.discussionId ?? undefined, workDir);
 
         if (!claudeResult.success) {
           throw new Error(claudeResult.output || `Claude exited with code ${claudeResult.exitCode}`);

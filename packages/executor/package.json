@@ -11,6 +11,7 @@
   "dependencies": {
     "@boardroom/shared": "*",
     "dotenv": "^16.4.7",
+    "nats": "^2.29.3",
     "uuid": "^11.1.0",
     "ws": "^8.18.0"
   },

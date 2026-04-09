@@ -76,6 +76,7 @@ export async function runClaude(
   onProgress: (chunk: string) => void,
   taskTitle?: string,
   discussionId?: string,
+  overrideWorkDir?: string,
 ): Promise<ClaudeResult> {
   // Fetch discussion context if available
   let discussionMessages: Array<{ sender: string; content: string }> | undefined;
@@ -90,7 +91,7 @@ export async function runClaude(
     discussionMessages,
   });
 
-  const workDir = process.env['WORK_DIR'] || process.cwd();
+  const workDir = overrideWorkDir || process.env['WORK_DIR'] || process.cwd();
   logger.info(`Spawning Claude Code CLI (cwd: ${workDir})`);
 
   return new Promise((resolve) => {

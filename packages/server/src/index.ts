@@ -21,6 +21,10 @@ import { MeetingTriggers } from './governance/triggers.js';
 import { CommitteeManager } from './governance/committees.js';
 import { WorkspaceManager } from './workspace/manager.js';
 import { SshHealthService } from './ws/ssh-health.js';
+import { connect, type NatsConnection } from 'nats';
+import { NatsBridge } from './fleet/nats-bridge.js';
+import { FleetHealthMonitor } from './fleet/health-monitor.js';
+import { FleetFileLockManager } from './fleet/file-lock.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -153,9 +157,55 @@ if (config.enableAdvisors && config.openrouterApiKey) {
   console.log('[advisors] ORACLE and SAGE marked online (OpenRouter)');
 }
 
+// ---------- NATS — Fleet Task Distribution ----------
+
+let nc: NatsConnection | null = null;
+let natsBridge: NatsBridge | null = null;
+let fleetHealthMonitor: FleetHealthMonitor | null = null;
+let fleetFileLock: FleetFileLockManager | null = null;
+
+async function initNats(): Promise<void> {
+  if (!config.natsEnabled) {
+    console.log('[nats] Disabled (NATS_ENABLED=false)');
+    return;
+  }
+
+  try {
+    nc = await connect({
+      servers: config.natsUrl,
+      name: 'boardroom-server',
+      reconnect: true,
+      maxReconnectAttempts: -1,
+      reconnectTimeWait: 2_000,
+    });
+
+    console.log(`[nats] Connected to ${nc.getServer()}`);
+
+    // Bridge: NATS events → WS broadcast + DB updates
+    natsBridge = new NatsBridge(nc, queries, registry, (envelope) => wsServer.broadcast(envelope));
+    await natsBridge.start();
+
+    // Health monitor: track alive/suspect/dead via heartbeats
+    fleetHealthMonitor = new FleetHealthMonitor(nc, registry, queries, dispatcher);
+    await fleetHealthMonitor.start();
+
+    // File lock manager: prevent concurrent writes
+    fleetFileLock = new FleetFileLockManager(nc);
+    await fleetFileLock.start();
+
+    // Give dispatcher the NATS connection for publishing tasks
+    dispatcher.setNats(nc);
+
+    console.log('[nats] Fleet systems online (bridge, health, file-locks)');
+  } catch (err) {
+    console.warn(`[nats] Failed to connect to ${config.natsUrl}: ${(err as Error).message}`);
+    console.warn('[nats] Falling back to WebSocket-only mode');
+  }
+}
+
 // ---------- Start ----------
 
-server.listen(config.port, config.host, () => {
+server.listen(config.port, config.host, async () => {
   console.log('');
   console.log('=================================');
   console.log('  BOARDROOM SERVER');
@@ -166,15 +216,24 @@ server.listen(config.port, config.host, () => {
   console.log(`  Database: ${dbPath}`);
   console.log(`  Agents: ${queries.getAllAgents().map((a) => `${a.id} (${a.role})`).join(', ')}`);
   console.log('');
+
+  // Connect to NATS after HTTP is ready
+  await initNats();
 });
 
 // ---------- Graceful shutdown ----------
 
-function shutdown(): void {
+async function shutdown(): Promise<void> {
   console.log('\n[server] Shutting down...');
   heartbeat.stop();
   sshHealth.stop();
+  fleetHealthMonitor?.stop();
   clearInterval(stuckTaskInterval);
+
+  if (nc) {
+    try { await nc.drain(); } catch { /* ignore */ }
+  }
+
   server.close(() => {
     db.close();
     console.log('[server] Closed');
@@ -182,5 +241,5 @@ function shutdown(): void {
   });
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => { shutdown(); });
+process.on('SIGTERM', () => { shutdown(); });
