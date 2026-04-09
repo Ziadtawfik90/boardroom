@@ -7,7 +7,7 @@ import { logger } from './logger.js';
 
 type RunnerType = 'claude' | 'shell' | 'git';
 
-const activeTasks = new Map<string, boolean>();
+const activeTasks = new Map<string, { cancel: () => void }>();
 
 export function getActiveTaskCount(): number {
   return activeTasks.size;
@@ -31,13 +31,23 @@ function detectRunner(task: Task): RunnerType {
   return 'claude';
 }
 
+/** Cancel a running task by ID */
+export function cancelTask(taskId: string): boolean {
+  const entry = activeTasks.get(taskId);
+  if (!entry) return false;
+  logger.info(`Cancelling task ${taskId}`);
+  entry.cancel();
+  return true;
+}
+
 export async function executeTask(task: Task, conn: Connection, workDir?: string): Promise<void> {
   if (activeTasks.has(task.id)) {
     logger.warn(`Task ${task.id} is already running, skipping`);
     return;
   }
 
-  activeTasks.set(task.id, true);
+  const abortController = new AbortController();
+  activeTasks.set(task.id, { cancel: () => abortController.abort() });
   const runner = detectRunner(task);
   logger.info(`Executing task ${task.id} (${task.title}) with runner: ${runner}`);
 

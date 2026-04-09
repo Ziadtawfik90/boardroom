@@ -2,13 +2,13 @@ import { connect, type NatsConnection } from 'nats';
 import { config } from './config.js';
 import { Connection } from './connection.js';
 import { Discussant } from './discussant.js';
-import { executeTask, getActiveTaskCount } from './runner.js';
+import { executeTask, getActiveTaskCount, cancelTask } from './runner.js';
 import { collectPongPayload } from './health.js';
 import { startNatsHeartbeat } from './nats-heartbeat.js';
 import { FileSync } from './sync.js';
 import { logger } from './logger.js';
 import type { WsEnvelope, TaskCreatedPayload, MessageNewPayload, DiscussionYourTurnPayload, DiscussionSoloAnalyzePayload } from '@boardroom/shared';
-import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type NodeId } from '@boardroom/shared';
+import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type FleetTaskCancel, type NodeId } from '@boardroom/shared';
 
 const conn = new Connection();
 const discussant = new Discussant(conn);
@@ -196,7 +196,28 @@ async function initNats(): Promise<void> {
       }
     })();
 
-    logger.info('[NATS] Fleet systems online (heartbeat, sync, task-sub)');
+    // Subscribe to task cancellations
+    const cancelSub = nc.subscribe(FLEET_SUBJECTS.taskCancel(config.agentId as NodeId));
+    logger.info(`[NATS] Listening for cancels on ${FLEET_SUBJECTS.taskCancel(config.agentId as NodeId)}`);
+
+    (async () => {
+      try {
+        for await (const msg of cancelSub) {
+          try {
+            const cancel = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskCancel;
+            if (cancel.type !== 'task.cancel') continue;
+            logger.info(`[NATS] Cancel received for task ${cancel.taskId}: ${cancel.reason}`);
+            cancelTask(cancel.taskId);
+          } catch (err) {
+            logger.error('[NATS] Failed to parse cancel message:', err);
+          }
+        }
+      } catch (err) {
+        logger.error('[NATS] Cancel subscription loop died:', (err as Error).message);
+      }
+    })();
+
+    logger.info('[NATS] Fleet systems online (heartbeat, sync, task-sub, cancel-sub)');
   } catch (err) {
     logger.warn(`[NATS] Failed to connect to ${config.natsUrl}: ${(err as Error).message}`);
     logger.warn('[NATS] Running in WebSocket-only mode');

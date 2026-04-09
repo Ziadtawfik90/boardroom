@@ -8,6 +8,9 @@ import type { NatsConnection } from 'nats';
 import type { AgentRegistry } from '../agent/registry.js';
 import type { Queries } from '../db/queries.js';
 import type { TaskDispatcher } from '../task/dispatcher.js';
+import { createFleetLogger } from './logger.js';
+
+const log = createFleetLogger('health');
 import type {
   NodeId,
   NodeState,
@@ -49,7 +52,7 @@ export class FleetHealthMonitor {
   async start(): Promise<void> {
     this.subscribeHeartbeats();
     this.checkInterval = setInterval(() => this.checkStale(), 1_000);
-    console.log('[fleet-health] Monitoring heartbeats from all nodes');
+    log.info('Monitoring heartbeats from all nodes');
   }
 
   private subscribeHeartbeats(): void {
@@ -61,13 +64,13 @@ export class FleetHealthMonitor {
             const hb = JSON.parse(new TextDecoder().decode(msg.data)) as FleetHeartbeat;
             this.processHeartbeat(hb);
           } catch (err) {
-            console.error('[fleet-health] Failed to parse heartbeat:', (err as Error).message);
+            log.error('Failed to parse heartbeat:', (err as Error).message);
           }
         }
       } catch (err) {
-        console.error('[fleet-health] Heartbeat subscription loop died:', (err as Error).message);
+        log.error('Heartbeat subscription loop died:', (err as Error).message);
         setTimeout(() => {
-          console.log('[fleet-health] Re-subscribing to heartbeats');
+          log.info('Re-subscribing to heartbeats');
           this.subscribeHeartbeats();
         }, 2_000);
       }
@@ -79,7 +82,7 @@ export class FleetHealthMonitor {
 
     // Dynamic registration: first heartbeat from an unknown node creates its entry
     if (!node) {
-      console.log(`[fleet-health] New node discovered: ${hb.nodeId}`);
+      log.info(`New node discovered: ${hb.nodeId}`);
       node = {
         nodeId: hb.nodeId,
         state: 'dead',
@@ -150,7 +153,7 @@ export class FleetHealthMonitor {
       new TextEncoder().encode(JSON.stringify(change)),
     );
 
-    console.log(`[fleet-health] ${nodeId}: ${previous} → ${current} (${reason})`);
+    log.info(`${nodeId}: ${previous} → ${current} (${reason})`);
 
     // Update boardroom agent registry
     if (current === 'alive') {

@@ -161,6 +161,18 @@ export interface FleetTaskRequeue {
   requeuedAt: string;
 }
 
+// ─── 9b. TaskCancel ─────────────────────────────────────────
+// Server → Daemon
+// Subject: fleet.task.cancel.{nodeId}
+
+export interface FleetTaskCancel {
+  type: 'task.cancel';
+  taskId: string;
+  nodeId: NodeId;
+  reason: string;
+  cancelledAt: string;
+}
+
 // ─── 10. SyncStart ───────────────────────────────────────────
 // Daemon → Server
 // Subject: fleet.sync.start.{nodeId}
@@ -198,6 +210,7 @@ export type FleetMessage =
   | FleetTaskAccepted
   | FleetTaskOutput
   | FleetTaskResult
+  | FleetTaskCancel
   | FleetHeartbeat
   | FleetPreWriteManifest
   | FleetManifestApproval
@@ -218,6 +231,7 @@ export const FLEET_SUBJECTS = {
   manifestPre: (nodeId: NodeId) => `fleet.manifest.pre.${nodeId}`,
   manifestDecision: (nodeId: NodeId) => `fleet.manifest.decision.${nodeId}`,
   nodeState: (nodeId: NodeId) => `fleet.node.state.${nodeId}`,
+  taskCancel: (nodeId: NodeId) => `fleet.task.cancel.${nodeId}`,
   taskRequeue: 'fleet.task.requeue',
   syncStart: (nodeId: NodeId) => `fleet.sync.start.${nodeId}`,
   syncComplete: (nodeId: NodeId) => `fleet.sync.complete.${nodeId}`,

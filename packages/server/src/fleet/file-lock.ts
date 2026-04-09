@@ -5,6 +5,9 @@
  */
 
 import type { NatsConnection } from 'nats';
+import { createFleetLogger } from './logger.js';
+
+const log = createFleetLogger('file-lock');
 import type {
   NodeId,
   FleetPreWriteManifest,
@@ -29,7 +32,7 @@ export class FleetFileLockManager {
   async start(): Promise<void> {
     this.subscribeManifests();
     this.subscribeResults();
-    console.log('[file-lock] Watching for pre-write manifests');
+    log.info('Watching for pre-write manifests');
   }
 
   private subscribeManifests(): void {
@@ -41,11 +44,11 @@ export class FleetFileLockManager {
             const manifest = JSON.parse(new TextDecoder().decode(msg.data)) as FleetPreWriteManifest;
             this.handleManifest(manifest);
           } catch (err) {
-            console.error('[file-lock] Failed to parse manifest:', (err as Error).message);
+            log.error('Failed to parse manifest:', (err as Error).message);
           }
         }
       } catch (err) {
-        console.error('[file-lock] Manifest subscription loop died:', (err as Error).message);
+        log.error('Manifest subscription loop died:', (err as Error).message);
         setTimeout(() => this.subscribeManifests(), 2_000);
       }
     })();
@@ -66,7 +69,7 @@ export class FleetFileLockManager {
           }
         }
       } catch (err) {
-        console.error('[file-lock] Result subscription loop died:', (err as Error).message);
+        log.error('Result subscription loop died:', (err as Error).message);
         setTimeout(() => this.subscribeResults(), 2_000);
       }
     })();
@@ -98,7 +101,7 @@ export class FleetFileLockManager {
         FLEET_SUBJECTS.manifestDecision(manifest.nodeId),
         new TextEncoder().encode(JSON.stringify(veto)),
       );
-      console.log(`[file-lock] VETOED task ${manifest.taskId} — ${conflicts.length} conflict(s)`);
+      log.info(`VETOED task ${manifest.taskId} — ${conflicts.length} conflict(s)`);
     } else {
       for (const path of manifest.willWrite) {
         this.locks.set(path, {
@@ -119,7 +122,7 @@ export class FleetFileLockManager {
         FLEET_SUBJECTS.manifestDecision(manifest.nodeId),
         new TextEncoder().encode(JSON.stringify(approval)),
       );
-      console.log(`[file-lock] Approved task ${manifest.taskId} — locked ${manifest.willWrite.length} file(s)`);
+      log.info(`Approved task ${manifest.taskId} — locked ${manifest.willWrite.length} file(s)`);
     }
   }
 
@@ -132,7 +135,7 @@ export class FleetFileLockManager {
       }
     }
     if (released > 0) {
-      console.log(`[file-lock] Released ${released} lock(s) for task ${taskId}`);
+      log.info(`Released ${released} lock(s) for task ${taskId}`);
     }
   }
 

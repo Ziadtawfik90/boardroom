@@ -5,7 +5,7 @@ import type { AgentRegistry } from '../agent/registry.js';
 import type { Queries } from '../db/queries.js';
 import type { DiscussionManager } from '../discussion/manager.js';
 import type { WorkspaceManager } from '../workspace/manager.js';
-import { FLEET_SUBJECTS, type FleetTaskDispatch, type NodeId } from '../../../shared/src/fleet-types.js';
+import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskCancel, type NodeId } from '../../../shared/src/fleet-types.js';
 
 type BroadcastFn = (envelope: import('../../../shared/src/protocol.js').WsEnvelope) => void;
 
@@ -195,6 +195,47 @@ export class TaskDispatcher {
     for (const task of tasks) {
       this.dispatchIfReady(task);
     }
+  }
+
+  /** Cancel a running task — sends cancel signal via NATS and updates DB */
+  cancelTask(taskId: string, reason = 'user_cancelled'): boolean {
+    const task = this.queries.getTask(taskId);
+    if (!task) return false;
+    if (task.status !== 'running' && task.status !== 'approved' && task.status !== 'pending') return false;
+
+    // Send cancel via NATS
+    if (this.nc) {
+      const cancel: FleetTaskCancel = {
+        type: 'task.cancel',
+        taskId,
+        nodeId: task.assignee as NodeId,
+        reason,
+        cancelledAt: new Date().toISOString(),
+      };
+      this.nc.publish(
+        FLEET_SUBJECTS.taskCancel(task.assignee as NodeId),
+        new TextEncoder().encode(JSON.stringify(cancel)),
+      );
+      console.log(`[dispatcher] Published cancel for task ${taskId} → ${task.assignee}`);
+    }
+
+    // Also send via WS if connected
+    const ws = this.registry.getConnection(task.assignee);
+    if (ws && ws.readyState === 1) {
+      const envelope = createEnvelope('task.failed', { taskId, error: `Cancelled: ${reason}` }, 'system');
+      ws.send(JSON.stringify(envelope));
+    }
+
+    // Update DB
+    this.queries.failTask(taskId, `Cancelled: ${reason}`);
+    this.queries.insertTaskLog(taskId, 'warn', `Task cancelled: ${reason}`);
+    this.queries.updateAgentStatus(task.assignee, 'online');
+
+    if (this.broadcast) {
+      this.broadcast(createEnvelope('task.failed', { taskId, error: `Cancelled: ${reason}` }, 'system'));
+    }
+
+    return true;
   }
 
   /** Requeue running tasks from a dead agent to another online agent */

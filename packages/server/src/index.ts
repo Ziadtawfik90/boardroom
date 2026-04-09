@@ -182,6 +182,42 @@ async function initNats(): Promise<void> {
 
     console.log(`[nats] Connected to ${nc.getServer()}`);
 
+    // Set up JetStream stream for task output (durable, survives restarts)
+    try {
+      const jsm = await nc.jetstreamManager();
+      try {
+        await jsm.streams.info('FLEET_OUTPUT');
+        console.log('[nats] JetStream stream FLEET_OUTPUT exists');
+      } catch {
+        await jsm.streams.add({
+          name: 'FLEET_OUTPUT',
+          subjects: ['fleet.task.output.*.*'],
+          retention: 'workqueue' as any,
+          max_age: 3600_000_000_000, // 1 hour in nanoseconds
+          max_bytes: 256 * 1024 * 1024, // 256MB
+          storage: 'file' as any,
+        });
+        console.log('[nats] JetStream stream FLEET_OUTPUT created');
+      }
+
+      // Stream for task lifecycle events (accepted, result) — for replay on restart
+      try {
+        await jsm.streams.info('FLEET_TASKS');
+      } catch {
+        await jsm.streams.add({
+          name: 'FLEET_TASKS',
+          subjects: ['fleet.task.accepted.*', 'fleet.task.result.*'],
+          retention: 'limits' as any,
+          max_age: 86400_000_000_000, // 24 hours in nanoseconds
+          max_bytes: 64 * 1024 * 1024, // 64MB
+          storage: 'file' as any,
+        });
+        console.log('[nats] JetStream stream FLEET_TASKS created');
+      }
+    } catch (err) {
+      console.warn(`[nats] JetStream setup failed (non-fatal): ${(err as Error).message}`);
+    }
+
     // Bridge: NATS events → WS broadcast + DB updates
     natsBridge = new NatsBridge(nc, queries, registry, (envelope) => wsServer.broadcast(envelope));
     await natsBridge.start();

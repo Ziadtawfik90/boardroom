@@ -17,10 +17,23 @@ import type {
   FleetTaskResult,
   FleetTaskOutput,
 } from '../../../shared/src/fleet-types.js';
+import { createFleetLogger } from './logger.js';
+
+const log = createFleetLogger('nats-bridge');
 
 type BroadcastFn = (envelope: WsEnvelope) => void;
 
+/** Tracks output sequence per task for ordered reassembly */
+interface OutputTracker {
+  nextSeq: number;
+  buffer: Map<number, FleetTaskOutput>; // out-of-order chunks waiting
+  lastActivity: number;
+}
+
 export class NatsBridge {
+  private outputTrackers = new Map<string, OutputTracker>();
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
   constructor(
     private nc: NatsConnection,
     private queries: Queries,
@@ -32,7 +45,22 @@ export class NatsBridge {
     this.subscribeTaskAccepted();
     this.subscribeTaskResults();
     this.subscribeTaskOutput();
-    console.log('[nats-bridge] Listening for fleet events');
+
+    // Clean up stale output trackers every 60s
+    this.cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [taskId, tracker] of this.outputTrackers) {
+        if (now - tracker.lastActivity > 300_000) { // 5 min stale
+          this.outputTrackers.delete(taskId);
+        }
+      }
+    }, 60_000);
+
+    log.info('Listening for fleet events');
+  }
+
+  stop(): void {
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
   }
 
   private subscribeTaskAccepted(): void {
@@ -71,15 +99,15 @@ export class NatsBridge {
             handler(msg);
           } catch (err) {
             if (!silent) {
-              console.error(`[nats-bridge] Error in ${label} handler:`, (err as Error).message);
+              log.error(`Error in ${label} handler:`, (err as Error).message);
             }
           }
         }
       } catch (err) {
-        console.error(`[nats-bridge] Subscription loop died for ${label}:`, (err as Error).message);
+        log.error(`Subscription loop died for ${label}:`, (err as Error).message);
         // Re-subscribe after a brief delay
         setTimeout(() => {
-          console.log(`[nats-bridge] Re-subscribing to ${subject}`);
+          log.info(`Re-subscribing to ${subject}`);
           this.resilientSubscribe(subject, label, handler, silent);
         }, 2_000);
       }
@@ -98,7 +126,7 @@ export class NatsBridge {
     this.queries.updateAgentStatus(data.nodeId, 'busy');
 
     this.broadcast(createEnvelope('task.accepted', { taskId: data.taskId }, data.nodeId));
-    console.log(`[nats-bridge] Task ${data.taskId} accepted by ${data.nodeId}`);
+    log.info(`Task ${data.taskId} accepted by ${data.nodeId}`);
   }
 
   private handleTaskResult(data: FleetTaskResult): void {
@@ -123,7 +151,8 @@ export class NatsBridge {
         result: { exitCode: data.exitCode, filesChanged: data.filesChanged },
       }, data.nodeId));
 
-      console.log(`[nats-bridge] Task ${data.taskId} completed on ${data.nodeId}`);
+      this.clearOutputTracker(data.taskId);
+      log.info(`Task ${data.taskId} completed on ${data.nodeId}`);
     } else {
       const error = data.error ?? `Task failed (exit ${data.exitCode})`;
       this.queries.failTask(data.taskId, error);
@@ -135,22 +164,56 @@ export class NatsBridge {
         error,
       }, data.nodeId));
 
-      console.log(`[nats-bridge] Task ${data.taskId} failed on ${data.nodeId}: ${error.slice(0, 100)}`);
+      this.clearOutputTracker(data.taskId);
+      log.info(`Task ${data.taskId} failed on ${data.nodeId}: ${error.slice(0, 100)}`);
     }
   }
 
   private handleTaskOutput(data: FleetTaskOutput): void {
-    // Decode base64 chunk and forward as task progress to WS
+    let tracker = this.outputTrackers.get(data.taskId);
+    if (!tracker) {
+      tracker = { nextSeq: 0, buffer: new Map(), lastActivity: Date.now() };
+      this.outputTrackers.set(data.taskId, tracker);
+    }
+    tracker.lastActivity = Date.now();
+
+    if (data.seq === tracker.nextSeq) {
+      // In-order: process immediately, then flush any buffered
+      this.emitOutput(data);
+      tracker.nextSeq++;
+
+      // Flush consecutive buffered chunks
+      while (tracker.buffer.has(tracker.nextSeq)) {
+        const buffered = tracker.buffer.get(tracker.nextSeq)!;
+        tracker.buffer.delete(tracker.nextSeq);
+        this.emitOutput(buffered);
+        tracker.nextSeq++;
+      }
+    } else if (data.seq > tracker.nextSeq) {
+      // Out-of-order: buffer for later (cap at 100 to prevent memory leak)
+      if (tracker.buffer.size < 100) {
+        tracker.buffer.set(data.seq, data);
+      }
+    }
+    // data.seq < tracker.nextSeq → duplicate, ignore
+  }
+
+  private emitOutput(data: FleetTaskOutput): void {
     const text = Buffer.from(data.chunk, 'base64').toString('utf-8');
 
-    // Update progress in DB
     this.queries.insertTaskLog(data.taskId, 'info', text.slice(0, 500));
 
-    // Broadcast to WS as task.progress
     this.broadcast(createEnvelope('task.progress', {
       taskId: data.taskId,
-      progress: 0, // We don't know exact progress from NATS output
+      progress: 0,
       log: text.slice(0, 500),
+      seq: data.seq,
+      stream: data.stream,
     }, data.nodeId));
+  }
+
+  /** Clean up tracker when task finishes */
+  clearOutputTracker(taskId: string): void {
+    this.outputTrackers.delete(taskId);
   }
 }
