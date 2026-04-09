@@ -1,46 +1,127 @@
 #!/bin/bash
-# Deploy executor agent to a remote PC
-# Usage: ./scripts/deploy-executor.sh <ssh_alias> <agent_id> <agent_key> <server_url>
+# Deploy boardroom executor to a remote PC, replacing any fleet-command daemon.
+#
+# Usage: ./scripts/deploy-executor.sh <target>
+#   target: "water" or "steam"
+#
+# What it does:
+#   1. Builds shared + executor packages
+#   2. Kills old fleet-command daemon and old boardroom executor on the target
+#   3. Packages and copies the executor to the remote PC
+#   4. Creates .env with all required config (NATS, FileSync, auth)
+#   5. Starts the executor in the background
+#
+# Prerequisites:
+#   - SSH aliases "pc2" (water) and "pc3" (steam) configured in ~/.ssh/config
+#   - Node.js installed on the remote PC
+#   - NATS server running on ASUS (port 4222)
+#   - Boardroom server running on ASUS (port 3101)
 
-set -e
+set -euo pipefail
 
-SSH_ALIAS="$1"
-AGENT_ID="$2"
-AGENT_KEY="$3"
-SERVER_URL="$4"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ -z "$SSH_ALIAS" ] || [ -z "$AGENT_ID" ] || [ -z "$AGENT_KEY" ] || [ -z "$SERVER_URL" ]; then
-  echo "Usage: $0 <ssh_alias> <agent_id> <agent_key> <server_url>"
-  echo "Example: $0 pc2 water my-key ws://192.168.50.1:3100/ws"
+# ─── Target configuration ────────────────────────────────────
+
+declare -A SSH_ALIAS=( [water]="pc2" [steam]="pc3" )
+declare -A HOST_IP=( [water]="192.168.50.2" [steam]="100.122.142.104" )
+declare -A AGENT_ROLE=( [water]="The Heavy Lifter" [steam]="The Operator" )
+
+# Agent keys — must match what's in the server's .env
+# Read from server's .env if available, otherwise use defaults
+SERVER_ENV="$REPO_DIR/.env"
+get_key() {
+  local var_name="$1"
+  local default="$2"
+  if [ -f "$SERVER_ENV" ]; then
+    grep "^${var_name}=" "$SERVER_ENV" 2>/dev/null | cut -d= -f2 || echo "$default"
+  else
+    echo "$default"
+  fi
+}
+
+# ASUS Tailscale IP (server address for remote agents)
+ASUS_TS_IP="${ASUS_TAILSCALE_IP:-100.119.103.67}"
+ASUS_LAN_IP="${ASUS_LAN_IP:-192.168.50.1}"
+
+# Prefer Tailscale for reliability, fallback to LAN
+SERVER_WS_URL="ws://${ASUS_TS_IP}:3101/ws"
+NATS_URL="nats://${ASUS_TS_IP}:4222"
+NATS_TOKEN=$(get_key "NATS_AUTH_TOKEN" "")
+
+REMOTE_DIR="boardroom-agent"
+
+# ─── Parse arguments ─────────────────────────────────────────
+
+TARGET="${1:-}"
+
+if [ -z "$TARGET" ]; then
+  echo "Usage: $0 <water|steam|all>"
+  echo ""
+  echo "Examples:"
+  echo "  $0 water        # Deploy to WATER (PC2)"
+  echo "  $0 steam        # Deploy to STEAM (PC3)"
+  echo "  $0 all          # Deploy to both"
   exit 1
 fi
 
-REMOTE_DIR="boardroom-agent"
-echo "=== Deploying executor to $SSH_ALIAS as $AGENT_ID ==="
+# ─── Deploy function ─────────────────────────────────────────
 
-# Create remote directory
-ssh "$SSH_ALIAS" "mkdir -p $REMOTE_DIR" 2>/dev/null
+deploy_to() {
+  local agent_id="$1"
+  local ssh="${SSH_ALIAS[$agent_id]}"
+  local role="${AGENT_ROLE[$agent_id]}"
+  local agent_key
 
-# Create a tarball of what's needed
-TMPDIR=$(mktemp -d)
-mkdir -p "$TMPDIR/executor/dist" "$TMPDIR/executor/node_modules" "$TMPDIR/shared/dist"
+  # Read agent key from server .env
+  local key_var="${agent_id^^}_API_KEY"  # e.g. WATER_API_KEY
+  agent_key=$(get_key "$key_var" "${agent_id}-dev-key")
 
-# Copy executor dist
-cp -r packages/executor/dist/* "$TMPDIR/executor/dist/"
-cp packages/executor/package.json "$TMPDIR/executor/"
+  echo ""
+  echo "════════════════════════════════════════════════"
+  echo "  Deploying to ${agent_id^^} (${ssh})"
+  echo "════════════════════════════════════════════════"
 
-# Copy shared dist
-cp -r packages/shared/dist/* "$TMPDIR/shared/dist/"
-cp packages/shared/package.json "$TMPDIR/shared/"
+  # Step 1: Build
+  echo "[1/6] Building packages..."
+  cd "$REPO_DIR"
+  npm -w packages/shared run build --silent 2>/dev/null
+  npm -w packages/executor run build --silent 2>/dev/null
 
-# Create a simple package.json for the remote
-cat > "$TMPDIR/package.json" << PKGJSON
+  # Step 2: Kill old processes on remote
+  echo "[2/6] Killing old daemons on $ssh..."
+  # Kill fleet-command daemon
+  ssh "$ssh" "taskkill /f /fi \"WINDOWTITLE eq fleet*\" 2>nul; taskkill /f /fi \"WINDOWTITLE eq boardroom*\" 2>nul" 2>/dev/null || true
+  # Also try killing by node process running executor or daemon
+  ssh "$ssh" "powershell -NoProfile -Command \"Get-Process node -ErrorAction SilentlyContinue | Where-Object { \\\$_.CommandLine -like '*executor*' -or \\\$_.CommandLine -like '*daemon*' -or \\\$_.CommandLine -like '*fleet*' } | Stop-Process -Force\" 2>nul" 2>/dev/null || true
+  echo "  Old processes cleared"
+
+  # Step 3: Package
+  echo "[3/6] Packaging executor..."
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  mkdir -p "$tmpdir/packages/executor/dist" "$tmpdir/packages/shared/dist"
+
+  # Copy executor dist + package.json
+  cp -r packages/executor/dist/* "$tmpdir/packages/executor/dist/"
+  cp packages/executor/package.json "$tmpdir/packages/executor/"
+
+  # Copy shared dist + package.json
+  cp -r packages/shared/dist/* "$tmpdir/packages/shared/dist/"
+  cp packages/shared/package.json "$tmpdir/packages/shared/"
+
+  # Root package.json with workspaces
+  cat > "$tmpdir/package.json" << PKGJSON
 {
   "name": "boardroom-agent",
   "private": true,
   "type": "module",
+  "workspaces": ["packages/*"],
   "dependencies": {
     "dotenv": "^16.4.7",
+    "nats": "^2.29.1",
     "uuid": "^11.1.0",
     "ws": "^8.18.0",
     "zod": "^3.24.0"
@@ -48,42 +129,118 @@ cat > "$TMPDIR/package.json" << PKGJSON
 }
 PKGJSON
 
-# Create .env
-cat > "$TMPDIR/.env" << ENVFILE
-AGENT_ID=$AGENT_ID
-AGENT_KEY=$AGENT_KEY
-SERVER_URL=$SERVER_URL
+  # Determine sync root based on OS
+  local sync_root="/mnt/c/fleet-work"
+  local is_windows=false
+  if ssh "$ssh" "cmd.exe /c echo ok" &>/dev/null; then
+    sync_root="C:\\fleet-work"
+    is_windows=true
+  fi
+
+  # Create .env
+  cat > "$tmpdir/.env" << ENVFILE
+# Boardroom Executor — ${agent_id^^}
+# Auto-generated by deploy-executor.sh on $(date -Iseconds)
+
+AGENT_ID=${agent_id}
+AGENT_KEY=${agent_key}
+AGENT_NAME=${agent_id^^}
+AGENT_ROLE=${role}
+SERVER_URL=${SERVER_WS_URL}
+
+# NATS
+FLEET_NATS_URL=${NATS_URL}
+FLEET_NATS_TOKEN=${NATS_TOKEN}
+FLEET_NATS_ENABLED=true
+
+# FileSync
+FLEET_IS_HUB=false
+FLEET_SYNC_ROOT=${sync_root}
+FLEET_HUB_SSH=pc1
+FLEET_HUB_PATH_PREFIX=/mnt/d/AI/
+FLEET_SYNC_RETRIES=3
+FLEET_SYNC_TIMEOUT=30
+FLEET_MAX_TASKS=3
 ENVFILE
 
-# Create start script
-cat > "$TMPDIR/start.sh" << 'STARTSH'
+  # Start scripts
+  cat > "$tmpdir/start.sh" << 'STARTSH'
 #!/bin/bash
 cd "$(dirname "$0")"
-node executor/dist/index.js
+exec node packages/executor/dist/index.js
 STARTSH
-chmod +x "$TMPDIR/start.sh"
+  chmod +x "$tmpdir/start.sh"
 
-# Create a bat file for Windows PCs
-cat > "$TMPDIR/start.bat" << 'BATFILE'
+  cat > "$tmpdir/start.bat" << 'BATFILE'
 @echo off
 cd /d "%~dp0"
-node executor\dist\index.js
+node packages\executor\dist\index.js
 BATFILE
 
-# Tar it up
-tar czf /tmp/boardroom-agent.tar.gz -C "$TMPDIR" .
+  # Tar it
+  tar czf /tmp/boardroom-executor-${agent_id}.tar.gz -C "$tmpdir" .
 
-# Copy to remote
-scp /tmp/boardroom-agent.tar.gz "$SSH_ALIAS:$REMOTE_DIR/" 2>/dev/null
+  # Step 4: Copy to remote
+  echo "[4/6] Copying to $ssh..."
+  ssh "$ssh" "mkdir -p $REMOTE_DIR" 2>/dev/null || true
+  scp -q /tmp/boardroom-executor-${agent_id}.tar.gz "$ssh:$REMOTE_DIR/"
 
-# Extract and install deps on remote
-ssh "$SSH_ALIAS" "cd $REMOTE_DIR && tar xzf boardroom-agent.tar.gz && rm boardroom-agent.tar.gz && npm install --production 2>/dev/null" 2>/dev/null
+  # Step 5: Extract and install
+  echo "[5/6] Installing on $ssh..."
+  ssh "$ssh" "cd $REMOTE_DIR && tar xzf boardroom-executor-${agent_id}.tar.gz && rm boardroom-executor-${agent_id}.tar.gz" 2>/dev/null
 
-# Setup node_modules symlink for @boardroom/shared
-ssh "$SSH_ALIAS" "cd $REMOTE_DIR && mkdir -p node_modules/@boardroom && ln -sf ../../shared node_modules/@boardroom/shared" 2>/dev/null
+  # Install dependencies
+  ssh "$ssh" "cd $REMOTE_DIR && npm install --production 2>/dev/null" 2>/dev/null || true
 
-echo "=== Deployed to $SSH_ALIAS ==="
-echo "Start with: ssh $SSH_ALIAS 'cd $REMOTE_DIR && node executor/dist/index.js'"
+  # Setup @boardroom/shared symlink
+  ssh "$ssh" "cd $REMOTE_DIR && mkdir -p node_modules/@boardroom && rm -f node_modules/@boardroom/shared && ln -sf ../../packages/shared node_modules/@boardroom/shared" 2>/dev/null || true
 
-# Cleanup
-rm -rf "$TMPDIR" /tmp/boardroom-agent.tar.gz
+  # Windows: use mklink if ln not available
+  if [ "$is_windows" = true ]; then
+    ssh "$ssh" "cd $REMOTE_DIR && if not exist node_modules\\@boardroom mkdir node_modules\\@boardroom && mklink /D node_modules\\@boardroom\\shared ..\\..\\packages\\shared" 2>/dev/null || true
+  fi
+
+  # Step 6: Start
+  echo "[6/6] Starting executor on $ssh..."
+  if [ "$is_windows" = true ]; then
+    ssh "$ssh" "cd $REMOTE_DIR && start /b cmd /c start.bat > boardroom-${agent_id}.log 2>&1" 2>/dev/null || true
+  else
+    ssh "$ssh" "cd $REMOTE_DIR && nohup bash start.sh > boardroom-${agent_id}.log 2>&1 &" 2>/dev/null || true
+  fi
+
+  # Verify
+  sleep 3
+  local log_tail
+  log_tail=$(ssh "$ssh" "cd $REMOTE_DIR && tail -5 boardroom-${agent_id}.log 2>/dev/null" 2>/dev/null || echo "Could not read log")
+
+  echo ""
+  echo "  ${agent_id^^} deployment complete"
+  echo "  Log tail:"
+  echo "  $log_tail"
+  echo ""
+
+  # Cleanup
+  rm -rf "$tmpdir" "/tmp/boardroom-executor-${agent_id}.tar.gz"
+}
+
+# ─── Main ─────────────────────────────────────────────────────
+
+cd "$REPO_DIR"
+
+if [ "$TARGET" = "all" ]; then
+  deploy_to "water"
+  deploy_to "steam"
+elif [ "${SSH_ALIAS[$TARGET]+_}" ]; then
+  deploy_to "$TARGET"
+else
+  echo "Unknown target: $TARGET"
+  echo "Valid targets: water, steam, all"
+  exit 1
+fi
+
+echo "════════════════════════════════════════════════"
+echo "  Deployment complete"
+echo ""
+echo "  Verify with:"
+echo "    curl -s http://localhost:3101/api/v1/agents | jq '.agents[] | {id, status}'"
+echo "════════════════════════════════════════════════"
