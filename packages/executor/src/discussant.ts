@@ -110,10 +110,24 @@ export class Discussant {
 
   private callClaudeCli(prompt: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = spawn('claude', ['--dangerously-skip-permissions'], {
+      const claudeBin = process.env['CLAUDE_BIN'] || (
+        process.platform === 'win32'
+          ? `${process.env['APPDATA'] ?? 'C:\\Users\\' + (process.env['USERNAME'] ?? 'user') + '\\AppData\\Roaming'}\\npm\\claude.cmd`
+          : 'claude'
+      );
+      const child = spawn(claudeBin, ['--dangerously-skip-permissions'], {
         timeout: 90_000,
         shell: true,
-        env: { ...process.env, TERM: 'dumb' },
+        env: {
+          ...process.env,
+          TERM: 'dumb',
+          PATH: [
+            process.env['APPDATA'] ? `${process.env['APPDATA']}\\npm` : '',
+            `${process.env['HOME']}/.local/bin`,
+            '/usr/local/bin',
+            process.env['PATH'] ?? '',
+          ].filter(Boolean).join(process.platform === 'win32' ? ';' : ':'),
+        },
       });
 
       let stdout = '';

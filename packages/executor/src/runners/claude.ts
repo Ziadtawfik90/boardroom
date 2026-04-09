@@ -92,16 +92,28 @@ export async function runClaude(
   });
 
   const workDir = overrideWorkDir || process.env['WORK_DIR'] || process.cwd();
-  logger.info(`Spawning Claude Code CLI (cwd: ${workDir})`);
+  // Resolve claude binary — check common locations
+  const claudeBin = process.env['CLAUDE_BIN'] || (
+    process.platform === 'win32'
+      ? `${process.env['APPDATA'] ?? 'C:\\Users\\' + (process.env['USERNAME'] ?? 'user') + '\\AppData\\Roaming'}\\npm\\claude.cmd`
+      : 'claude'
+  );
+  logger.info(`Spawning Claude Code CLI: ${claudeBin} (cwd: ${workDir})`);
 
   return new Promise((resolve) => {
     // Pipe prompt via stdin — no escaping issues
-    const child = spawn('claude', ['-p', '--dangerously-skip-permissions'], {
+    const child = spawn(claudeBin, ['-p', '--dangerously-skip-permissions'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: workDir,
       env: {
         ...process.env,
-        PATH: `${process.env['HOME']}/.local/bin:${process.env['HOME']}/.npm-global/bin:/usr/local/bin:${process.env['PATH']}`,
+        PATH: [
+          process.env['APPDATA'] ? `${process.env['APPDATA']}\\npm` : '',
+          `${process.env['HOME']}/.local/bin`,
+          `${process.env['HOME']}/.npm-global/bin`,
+          '/usr/local/bin',
+          process.env['PATH'] ?? '',
+        ].filter(Boolean).join(process.platform === 'win32' ? ';' : ':'),
       },
     });
 
