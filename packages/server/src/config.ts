@@ -50,5 +50,6 @@ export const config = {
 
   // NATS — fleet task distribution
   natsUrl: process.env.NATS_URL ?? 'nats://localhost:4222',
+  natsToken: process.env.NATS_AUTH_TOKEN ?? '',
   natsEnabled: process.env.NATS_ENABLED !== 'false',
 } as const;

@@ -33,10 +33,12 @@ export class FleetHealthMonitor {
     private queries: Queries,
     private dispatcher: TaskDispatcher,
   ) {
-    // Initialize all known agents
-    for (const nodeId of ['asus', 'water', 'steam'] as NodeId[]) {
-      this.nodes.set(nodeId, {
-        nodeId,
+    // Seed from DB — any agent that exists in the agents table gets tracked.
+    // New agents are also registered dynamically on first heartbeat.
+    const dbAgents = queries.getAllAgents();
+    for (const agent of dbAgents) {
+      this.nodes.set(agent.id as NodeId, {
+        nodeId: agent.id as NodeId,
         state: 'dead',
         lastHeartbeat: 0,
         lastData: null,
@@ -45,26 +47,47 @@ export class FleetHealthMonitor {
   }
 
   async start(): Promise<void> {
-    const sub = this.nc.subscribe('fleet.heartbeat.*');
-
-    (async () => {
-      for await (const msg of sub) {
-        try {
-          const hb = JSON.parse(new TextDecoder().decode(msg.data)) as FleetHeartbeat;
-          this.processHeartbeat(hb);
-        } catch (err) {
-          console.error('[fleet-health] Failed to parse heartbeat:', err);
-        }
-      }
-    })();
-
+    this.subscribeHeartbeats();
     this.checkInterval = setInterval(() => this.checkStale(), 1_000);
     console.log('[fleet-health] Monitoring heartbeats from all nodes');
   }
 
+  private subscribeHeartbeats(): void {
+    const sub = this.nc.subscribe('fleet.heartbeat.*');
+    (async () => {
+      try {
+        for await (const msg of sub) {
+          try {
+            const hb = JSON.parse(new TextDecoder().decode(msg.data)) as FleetHeartbeat;
+            this.processHeartbeat(hb);
+          } catch (err) {
+            console.error('[fleet-health] Failed to parse heartbeat:', (err as Error).message);
+          }
+        }
+      } catch (err) {
+        console.error('[fleet-health] Heartbeat subscription loop died:', (err as Error).message);
+        setTimeout(() => {
+          console.log('[fleet-health] Re-subscribing to heartbeats');
+          this.subscribeHeartbeats();
+        }, 2_000);
+      }
+    })();
+  }
+
   private processHeartbeat(hb: FleetHeartbeat): void {
-    const node = this.nodes.get(hb.nodeId);
-    if (!node) return;
+    let node = this.nodes.get(hb.nodeId);
+
+    // Dynamic registration: first heartbeat from an unknown node creates its entry
+    if (!node) {
+      console.log(`[fleet-health] New node discovered: ${hb.nodeId}`);
+      node = {
+        nodeId: hb.nodeId,
+        state: 'dead',
+        lastHeartbeat: 0,
+        lastData: null,
+      };
+      this.nodes.set(hb.nodeId, node);
+    }
 
     const previousState = node.state;
     node.lastHeartbeat = Date.now();
@@ -89,7 +112,7 @@ export class FleetHealthMonitor {
     for (const [nodeId, node] of this.nodes) {
       if (node.lastHeartbeat === 0) continue;
 
-      const thresholds = FLEET_HEARTBEAT_THRESHOLDS[nodeId];
+      const thresholds = FLEET_HEARTBEAT_THRESHOLDS[nodeId] ?? { suspectMs: 10_000, deadMs: 30_000 };
       const elapsed = now - node.lastHeartbeat;
 
       let newState: NodeState = node.state;

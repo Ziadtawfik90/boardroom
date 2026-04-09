@@ -27,35 +27,49 @@ export class FleetFileLockManager {
   constructor(private nc: NatsConnection) {}
 
   async start(): Promise<void> {
-    // Listen for manifest requests from all nodes
-    const manifestSub = this.nc.subscribe('fleet.manifest.pre.*');
-    (async () => {
-      for await (const msg of manifestSub) {
-        try {
-          const manifest = JSON.parse(new TextDecoder().decode(msg.data)) as FleetPreWriteManifest;
-          this.handleManifest(manifest);
-        } catch (err) {
-          console.error('[file-lock] Failed to parse manifest:', err);
-        }
-      }
-    })();
-
-    // Listen for task results to release locks
-    const resultSub = this.nc.subscribe('fleet.task.result.*');
-    (async () => {
-      for await (const msg of resultSub) {
-        try {
-          const result = JSON.parse(new TextDecoder().decode(msg.data));
-          if (result.taskId) {
-            this.releaseLocks(result.taskId);
-          }
-        } catch {
-          // ignore
-        }
-      }
-    })();
-
+    this.subscribeManifests();
+    this.subscribeResults();
     console.log('[file-lock] Watching for pre-write manifests');
+  }
+
+  private subscribeManifests(): void {
+    const sub = this.nc.subscribe('fleet.manifest.pre.*');
+    (async () => {
+      try {
+        for await (const msg of sub) {
+          try {
+            const manifest = JSON.parse(new TextDecoder().decode(msg.data)) as FleetPreWriteManifest;
+            this.handleManifest(manifest);
+          } catch (err) {
+            console.error('[file-lock] Failed to parse manifest:', (err as Error).message);
+          }
+        }
+      } catch (err) {
+        console.error('[file-lock] Manifest subscription loop died:', (err as Error).message);
+        setTimeout(() => this.subscribeManifests(), 2_000);
+      }
+    })();
+  }
+
+  private subscribeResults(): void {
+    const sub = this.nc.subscribe('fleet.task.result.*');
+    (async () => {
+      try {
+        for await (const msg of sub) {
+          try {
+            const result = JSON.parse(new TextDecoder().decode(msg.data));
+            if (result.taskId) {
+              this.releaseLocks(result.taskId);
+            }
+          } catch {
+            // ignore parse errors on result messages
+          }
+        }
+      } catch (err) {
+        console.error('[file-lock] Result subscription loop died:', (err as Error).message);
+        setTimeout(() => this.subscribeResults(), 2_000);
+      }
+    })();
   }
 
   private handleManifest(manifest: FleetPreWriteManifest): void {

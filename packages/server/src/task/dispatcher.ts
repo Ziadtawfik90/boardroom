@@ -50,24 +50,20 @@ export class TaskDispatcher {
       console.log(`[dispatcher] Auto-routed task ${task.id} → ${selectedAgent}`);
     }
 
-    // Try NATS first (reliable, survives disconnects)
+    // NATS primary — try it first. Only fall back to WS if NATS is unavailable.
     const natsDispatched = this.dispatchViaNats(task);
-
-    // Also try WebSocket as fast-path (if executor is connected)
-    const ws = this.registry.getConnection(task.assignee);
-    if (ws && ws.readyState === 1) {
-      const envelope = createEnvelope('task.created', { task }, 'system');
-      ws.send(JSON.stringify(envelope));
-      console.log(`[dispatcher] Sent task ${task.id} to ${task.assignee} via WebSocket`);
-    }
-
     if (natsDispatched) {
       this.queries.audit('system', 'dispatch-nats', 'task', task.id, { assignee: task.assignee });
       return true;
     }
 
+    // Fallback: WebSocket direct send (only if NATS failed)
+    const ws = this.registry.getConnection(task.assignee);
     if (ws && ws.readyState === 1) {
-      this.queries.audit('system', 'dispatch-ws', 'task', task.id, { assignee: task.assignee });
+      const envelope = createEnvelope('task.created', { task }, 'system');
+      ws.send(JSON.stringify(envelope));
+      console.log(`[dispatcher] Sent task ${task.id} to ${task.assignee} via WebSocket (NATS unavailable)`);
+      this.queries.audit('system', 'dispatch-ws-fallback', 'task', task.id, { assignee: task.assignee });
       return true;
     }
 

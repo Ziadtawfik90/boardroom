@@ -62,7 +62,7 @@ export class FileSync {
       '--partial',
       `--timeout=${this.config.timeoutSec}`,
       '--delete',
-      `-e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no"`,
+      `-e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"`,
       ...this.config.extraFlags,
     ].join(' ');
 
@@ -104,7 +104,7 @@ export class FileSync {
       '--partial',
       `--timeout=${this.config.timeoutSec}`,
       '--itemize-changes',
-      `-e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no"`,
+      `-e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"`,
       ...this.config.extraFlags,
     ].join(' ');
 
@@ -134,8 +134,7 @@ export class FileSync {
 
     const durationMs = Date.now() - startTime;
     this.publishSyncComplete(taskId, 'push', 0, 0, durationMs, 'sync_push_failed');
-    console.error(`[sync] Push failed after ${this.config.retries} attempts`);
-    return [];
+    throw new Error(`sync_push_failed after ${this.config.retries} attempts: ${lastError?.message}`);
   }
 
   private parseItemizeChanges(output: string): string[] {

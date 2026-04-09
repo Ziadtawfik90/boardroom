@@ -36,43 +36,52 @@ export class NatsBridge {
   }
 
   private subscribeTaskAccepted(): void {
-    const sub = this.nc.subscribe('fleet.task.accepted.*');
-    (async () => {
-      for await (const msg of sub) {
-        try {
-          const data = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskAccepted;
-          this.handleTaskAccepted(data);
-        } catch (err) {
-          console.error('[nats-bridge] Failed to parse task accepted:', err);
-        }
-      }
-    })();
+    this.resilientSubscribe('fleet.task.accepted.*', 'task-accepted', (msg) => {
+      const data = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskAccepted;
+      this.handleTaskAccepted(data);
+    });
   }
 
   private subscribeTaskResults(): void {
-    const sub = this.nc.subscribe('fleet.task.result.*');
-    (async () => {
-      for await (const msg of sub) {
-        try {
-          const data = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskResult;
-          this.handleTaskResult(data);
-        } catch (err) {
-          console.error('[nats-bridge] Failed to parse task result:', err);
-        }
-      }
-    })();
+    this.resilientSubscribe('fleet.task.result.*', 'task-result', (msg) => {
+      const data = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskResult;
+      this.handleTaskResult(data);
+    });
   }
 
   private subscribeTaskOutput(): void {
-    const sub = this.nc.subscribe('fleet.task.output.*.*');
+    this.resilientSubscribe('fleet.task.output.*.*', 'task-output', (msg) => {
+      const data = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskOutput;
+      this.handleTaskOutput(data);
+    }, true); // silent = true for high-frequency output
+  }
+
+  /** Wraps NATS subscription in error boundary that logs and continues */
+  private resilientSubscribe(
+    subject: string,
+    label: string,
+    handler: (msg: import('nats').Msg) => void,
+    silent = false,
+  ): void {
+    const sub = this.nc.subscribe(subject);
     (async () => {
-      for await (const msg of sub) {
-        try {
-          const data = JSON.parse(new TextDecoder().decode(msg.data)) as FleetTaskOutput;
-          this.handleTaskOutput(data);
-        } catch (err) {
-          // Output is high-frequency, don't log parse errors
+      try {
+        for await (const msg of sub) {
+          try {
+            handler(msg);
+          } catch (err) {
+            if (!silent) {
+              console.error(`[nats-bridge] Error in ${label} handler:`, (err as Error).message);
+            }
+          }
         }
+      } catch (err) {
+        console.error(`[nats-bridge] Subscription loop died for ${label}:`, (err as Error).message);
+        // Re-subscribe after a brief delay
+        setTimeout(() => {
+          console.log(`[nats-bridge] Re-subscribing to ${subject}`);
+          this.resilientSubscribe(subject, label, handler, silent);
+        }, 2_000);
       }
     })();
   }

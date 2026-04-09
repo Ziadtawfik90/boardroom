@@ -174,6 +174,7 @@ async function initNats(): Promise<void> {
     nc = await connect({
       servers: config.natsUrl,
       name: 'boardroom-server',
+      token: config.natsToken || undefined,
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,

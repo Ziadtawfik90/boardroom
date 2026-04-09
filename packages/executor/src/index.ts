@@ -90,8 +90,13 @@ async function handleNatsTask(task: FleetTaskDispatch): Promise<void> {
     // File sync: push results back to hub
     let filesChanged: string[] = [];
     if (fileSync && workDir !== task.workDir) {
-      filesChanged = await fileSync.pushToHub(task.taskId, workDir, task.workDir);
-      logger.info(`[sync] Pushed ${filesChanged.length} files back to hub`);
+      try {
+        filesChanged = await fileSync.pushToHub(task.taskId, workDir, task.workDir);
+        logger.info(`[sync] Pushed ${filesChanged.length} files back to hub`);
+      } catch (syncErr) {
+        logger.error(`[sync] Push failed — task completed but results may not be on hub: ${(syncErr as Error).message}`);
+        // Don't fail the task — the work was done, only sync failed
+      }
     }
 
     // Report result via NATS
@@ -147,6 +152,7 @@ async function initNats(): Promise<void> {
     nc = await connect({
       servers: config.natsUrl,
       name: `boardroom-executor-${config.agentId}`,
+      token: config.natsToken || undefined,
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,

@@ -27,6 +27,7 @@ export const config = {
 
   // NATS — fleet task distribution
   natsUrl: process.env['FLEET_NATS_URL'] ?? 'nats://localhost:4222',
+  natsToken: process.env['FLEET_NATS_TOKEN'] ?? '',
   natsEnabled: process.env['FLEET_NATS_ENABLED'] !== 'false',
 
   // FileSync — rsync between hub (ASUS) and workers
