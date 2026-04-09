@@ -17,7 +17,7 @@ import type {
   FleetHeartbeat,
   FleetNodeStateChange,
 } from '../../../shared/src/fleet-types.js';
-import { FLEET_SUBJECTS, FLEET_HEARTBEAT_THRESHOLDS } from '../../../shared/src/fleet-types.js';
+import { FLEET_SUBJECTS, FLEET_HEARTBEAT_THRESHOLDS, FLEET_HEARTBEAT_DEFAULTS } from '../../../shared/src/fleet-types.js';
 
 interface NodeHealth {
   nodeId: NodeId;
@@ -115,7 +115,7 @@ export class FleetHealthMonitor {
     for (const [nodeId, node] of this.nodes) {
       if (node.lastHeartbeat === 0) continue;
 
-      const thresholds = FLEET_HEARTBEAT_THRESHOLDS[nodeId] ?? { suspectMs: 10_000, deadMs: 30_000 };
+      const thresholds = FLEET_HEARTBEAT_THRESHOLDS[nodeId] ?? FLEET_HEARTBEAT_DEFAULTS;
       const elapsed = now - node.lastHeartbeat;
 
       let newState: NodeState = node.state;

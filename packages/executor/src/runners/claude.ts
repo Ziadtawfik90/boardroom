@@ -107,15 +107,15 @@ export async function runClaude(
 
     if (existsSync(cliPath)) {
       claudeCmd = process.execPath; // node.exe
-      claudeArgs = [cliPath, '-p', '--dangerously-skip-permissions'];
+      claudeArgs = [cliPath, '-p', '--dangerously-skip-permissions', '--output-format', 'json'];
     } else {
       // Fallback: try claude.cmd with shell
       claudeCmd = `${npmDir}\\claude.cmd`;
-      claudeArgs = ['-p', '--dangerously-skip-permissions'];
+      claudeArgs = ['-p', '--dangerously-skip-permissions', '--output-format', 'json'];
     }
   } else {
     claudeCmd = process.env['CLAUDE_BIN'] || 'claude';
-    claudeArgs = ['-p', '--dangerously-skip-permissions'];
+    claudeArgs = ['-p', '--dangerously-skip-permissions', '--output-format', 'json'];
   }
 
   logger.info(`Spawning Claude Code CLI: ${claudeCmd} ${claudeArgs[0]} (cwd: ${workDir})`);
@@ -136,20 +136,22 @@ export async function runClaude(
       },
     });
 
+    // Set encoding on pipes for reliable Windows output capture
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+
     // Write prompt to stdin and close it
     child.stdin.write(prompt);
     child.stdin.end();
 
     const chunks: string[] = [];
 
-    child.stdout.on('data', (data: Buffer) => {
-      const text = data.toString();
+    child.stdout.on('data', (text: string) => {
       chunks.push(text);
       onProgress(text);
     });
 
-    child.stderr.on('data', (data: Buffer) => {
-      const text = data.toString();
+    child.stderr.on('data', (text: string) => {
       chunks.push(`[stderr] ${text}`);
       logger.warn('Claude stderr', text);
     });
@@ -164,8 +166,22 @@ export async function runClaude(
     });
 
     child.on('close', (code: number | null) => {
-      const output = chunks.join('');
+      const rawOutput = chunks.join('');
       logger.info(`Claude CLI exited with code ${code}`);
+
+      // Parse JSON output if available (--output-format json)
+      let output = rawOutput;
+      try {
+        const parsed = JSON.parse(rawOutput);
+        if (parsed.result) {
+          output = parsed.result;
+        } else if (parsed.content) {
+          output = parsed.content;
+        }
+      } catch {
+        // Not JSON — use raw output (happens if CLI doesn't support --output-format)
+      }
+
       resolve({
         success: code === 0,
         output,

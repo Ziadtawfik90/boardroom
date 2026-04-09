@@ -242,7 +242,10 @@ export const FLEET_SUBJECTS = {
 export const FLEET_HEARTBEAT_INTERVAL_MS = 5_000;
 
 export const FLEET_HEARTBEAT_THRESHOLDS: Record<NodeId, { suspectMs: number; deadMs: number }> = {
-  asus: { suspectMs: 5_000, deadMs: 15_000 },
-  water: { suspectMs: 5_000, deadMs: 15_000 },
-  steam: { suspectMs: 30_000, deadMs: 90_000 }, // WiFi grace
+  asus: { suspectMs: 15_000, deadMs: 45_000 },
+  water: { suspectMs: 15_000, deadMs: 45_000 },
+  steam: { suspectMs: 30_000, deadMs: 90_000 }, // WiFi/Tailscale grace
 };
+
+/** Default thresholds for dynamically registered nodes */
+export const FLEET_HEARTBEAT_DEFAULTS = { suspectMs: 15_000, deadMs: 45_000 };
