@@ -5,3 +5,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+nats/jetstream-data/
+nats/nats.log
+*.log
