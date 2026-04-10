@@ -6,7 +6,7 @@
  * Decides when to intervene, approves tasks, and controls flow.
  */
 
-import { callAnthropicJSON } from '../ai/anthropic.js';
+import { callChairmanCLI } from '../ai/anthropic.js';
 import { createEnvelope } from '../../../shared/src/protocol.js';
 import type { WsEnvelope } from '../../../shared/src/protocol.js';
 import type { Message, Task } from '../../../shared/src/types.js';
@@ -223,7 +223,7 @@ export class ChairmanSession {
         content: m.content,
       }));
 
-      const decision = await callAnthropicJSON<ChairmanDecision>(
+      const decision = await callChairmanCLI<ChairmanDecision>(
         this.config.model,
         CHAIRMAN_SYSTEM_PROMPT,
         messages,

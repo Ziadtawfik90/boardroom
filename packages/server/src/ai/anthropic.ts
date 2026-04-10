@@ -1,9 +1,10 @@
 /**
- * Direct Anthropic API client for the AI Chairman.
- * Uses your Anthropic subscription directly — no OpenRouter middleman.
+ * Claude CLI client for the AI Chairman.
+ * Routes through Claude Code CLI — covered by your Max subscription.
+ * No API charges.
  */
 
-import { config } from '../config.js';
+import { runClaudeOnPC } from '../task/ssh-runner.js';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -11,49 +12,47 @@ interface ChatMessage {
 }
 
 /**
- * Call the Anthropic Messages API directly and parse JSON response.
+ * Call Claude Code CLI locally and parse JSON from the response.
+ * Uses the same `claude --dangerously-skip-permissions` as agents.
  */
-export async function callAnthropicJSON<T = unknown>(
-  model: string,
+export async function callChairmanCLI<T = unknown>(
+  _model: string, // ignored — CLI uses whatever model your subscription has
   systemPrompt: string,
   messages: ChatMessage[],
-  maxTokens: number = 1500,
+  _maxTokens: number = 1500,
 ): Promise<T> {
-  if (!config.anthropicApiKey) {
-    throw new Error('ANTHROPIC_API_KEY not configured — chairman requires it');
+  // Build a single prompt from system + conversation history
+  const parts: string[] = [systemPrompt, ''];
+
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      parts.push(msg.content);
+    } else {
+      parts.push(`[YOUR PREVIOUS RESPONSE]: ${msg.content}`);
+    }
+    parts.push('');
   }
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': config.anthropicApiKey,
-      'anthropic-version': '2023-06-01',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages,
-    }),
-    signal: AbortSignal.timeout(60_000),
-  });
+  parts.push('Respond with ONLY valid JSON. No markdown, no explanation, just the JSON object.');
 
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Anthropic ${resp.status}: ${body}`);
+  const prompt = parts.join('\n');
+
+  const result = await runClaudeOnPC(null, prompt, 90_000);
+
+  if (!result.success) {
+    throw new Error(`Claude CLI failed (exit ${result.exitCode}): ${result.output}`);
   }
 
-  const data = await resp.json() as {
-    content: Array<{ type: string; text: string }>;
-  };
+  let raw = result.output;
 
-  let raw = data.content
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('');
+  // Extract JSON from the response — Claude may wrap it in text
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    raw = jsonMatch[0];
+  }
 
-  // Strip markdown fences if model wraps JSON in ```json ... ```
+  // Strip markdown fences if present
   raw = raw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+
   return JSON.parse(raw) as T;
 }
