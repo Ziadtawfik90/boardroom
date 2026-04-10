@@ -5,7 +5,7 @@ import type { AgentRegistry } from '../agent/registry.js';
 import type { Queries } from '../db/queries.js';
 import type { DiscussionManager } from '../discussion/manager.js';
 import type { WorkspaceManager } from '../workspace/manager.js';
-import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskCancel, type NodeId } from '../../../shared/src/fleet-types.js';
+import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskCancel, type FleetCommand, type FleetCommandAction, type NodeId } from '../../../shared/src/fleet-types.js';
 
 type BroadcastFn = (envelope: import('../../../shared/src/protocol.js').WsEnvelope) => void;
 
@@ -195,6 +195,26 @@ export class TaskDispatcher {
     for (const task of tasks) {
       this.dispatchIfReady(task);
     }
+  }
+
+  /** Send a remote command to an executor via NATS */
+  sendCommand(nodeId: string, action: FleetCommandAction, payload?: Record<string, string>): boolean {
+    if (!this.nc) return false;
+
+    const cmd: FleetCommand = {
+      type: 'command',
+      nodeId: nodeId as NodeId,
+      action,
+      payload,
+      issuedAt: new Date().toISOString(),
+    };
+
+    this.nc.publish(
+      FLEET_SUBJECTS.command(nodeId as NodeId),
+      new TextEncoder().encode(JSON.stringify(cmd)),
+    );
+    console.log(`[dispatcher] Sent command "${action}" to ${nodeId}`);
+    return true;
   }
 
   /** Cancel a running task — sends cancel signal via NATS and updates DB */

@@ -7,15 +7,16 @@ import { collectPongPayload } from './health.js';
 import { startNatsHeartbeat } from './nats-heartbeat.js';
 import { FileSync } from './sync.js';
 import { GitSync } from './git-sync.js';
+import { NatsSync } from './nats-sync.js';
 import { logger } from './logger.js';
 import type { WsEnvelope, TaskCreatedPayload, MessageNewPayload, DiscussionYourTurnPayload, DiscussionSoloAnalyzePayload } from '@boardroom/shared';
-import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type FleetTaskCancel, type NodeId } from '@boardroom/shared';
+import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type FleetTaskCancel, type FleetCommand, type NodeId } from '@boardroom/shared';
 
 const conn = new Connection();
 const discussant = new Discussant(conn);
 
 let nc: NatsConnection | null = null;
-let fileSync: FileSync | GitSync | null = null;
+let fileSync: FileSync | GitSync | NatsSync | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 
 // --- NATS task handler ---
@@ -178,8 +179,23 @@ async function initNats(): Promise<void> {
     // Start heartbeat
     heartbeatTimer = startNatsHeartbeat(nc, config.agentId as NodeId, getActiveTaskCount);
 
-    // Initialize file sync (git mode = no SSH, rsync mode = legacy)
-    if (config.syncMode === 'git') {
+    // Initialize file sync
+    if (config.syncMode === 'nats') {
+      const natsSync = new NatsSync(
+        nc,
+        {
+          syncRoot: config.syncRoot,
+          hubPathPrefix: config.hubPathPrefix,
+          isHub: config.isHub,
+          timeoutSec: config.syncTimeoutSec,
+          bucketName: config.natsSyncBucket,
+        },
+        config.agentId as NodeId,
+      );
+      await natsSync.init();
+      fileSync = natsSync;
+      logger.info(`[sync] Using NATS Object Store sync (zero SSH)`);
+    } else if (config.syncMode === 'git') {
       fileSync = new GitSync(
         {
           syncRoot: config.syncRoot,
@@ -249,7 +265,62 @@ async function initNats(): Promise<void> {
       }
     })();
 
-    logger.info('[NATS] Fleet systems online (heartbeat, sync, task-sub, cancel-sub)');
+    // Subscribe to remote commands (restart, update, shutdown)
+    const cmdSub = nc.subscribe(FLEET_SUBJECTS.command(config.agentId as NodeId));
+    logger.info(`[NATS] Listening for commands on ${FLEET_SUBJECTS.command(config.agentId as NodeId)}`);
+
+    (async () => {
+      try {
+        for await (const msg of cmdSub) {
+          try {
+            const cmd = JSON.parse(new TextDecoder().decode(msg.data)) as FleetCommand;
+            if (cmd.type !== 'command') continue;
+            logger.info(`[NATS] Command received: ${cmd.action}`);
+
+            switch (cmd.action) {
+              case 'restart':
+                logger.info('[NATS] Restarting executor...');
+                // Graceful restart: drain NATS, then exit (nssm/service manager will restart)
+                setTimeout(async () => {
+                  try { await nc!.drain(); } catch {}
+                  process.exit(0);
+                }, 1_000);
+                break;
+
+              case 'update':
+                logger.info('[NATS] Self-updating: git pull + rebuild...');
+                try {
+                  const { execSync: exec } = require('node:child_process');
+                  exec('git pull origin master', { cwd: process.cwd(), timeout: 30_000 });
+                  exec('npm run build', { cwd: process.cwd(), timeout: 60_000 });
+                  logger.info('[NATS] Update complete, restarting...');
+                  setTimeout(async () => {
+                    try { await nc!.drain(); } catch {}
+                    process.exit(0);
+                  }, 1_000);
+                } catch (updateErr) {
+                  logger.error('[NATS] Update failed:', (updateErr as Error).message);
+                }
+                break;
+
+              case 'shutdown':
+                logger.info('[NATS] Shutting down...');
+                await shutdown('NATS_COMMAND');
+                break;
+
+              default:
+                logger.warn(`[NATS] Unknown command: ${cmd.action}`);
+            }
+          } catch (err) {
+            logger.error('[NATS] Failed to parse command:', (err as Error).message);
+          }
+        }
+      } catch (err) {
+        logger.error('[NATS] Command subscription loop died:', (err as Error).message);
+      }
+    })();
+
+    logger.info('[NATS] Fleet systems online (heartbeat, sync, tasks, cancel, commands)');
   } catch (err) {
     logger.warn(`[NATS] Failed to connect to ${config.natsUrl}: ${(err as Error).message}`);
     logger.warn('[NATS] Running in WebSocket-only mode');

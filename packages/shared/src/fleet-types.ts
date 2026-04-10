@@ -203,6 +203,20 @@ export interface FleetSyncComplete {
   timestamp: string;
 }
 
+// ─── 12. FleetCommand ───────────────────────────────────────
+// Server → Daemon (remote control)
+// Subject: fleet.command.{nodeId}
+
+export type FleetCommandAction = 'restart' | 'update' | 'shutdown' | 'pull-config';
+
+export interface FleetCommand {
+  type: 'command';
+  nodeId: NodeId;
+  action: FleetCommandAction;
+  payload?: Record<string, string>;
+  issuedAt: string;
+}
+
 // ─── Union Type ──────────────────────────────────────────────
 
 export type FleetMessage =
@@ -218,7 +232,8 @@ export type FleetMessage =
   | FleetNodeStateChange
   | FleetTaskRequeue
   | FleetSyncStart
-  | FleetSyncComplete;
+  | FleetSyncComplete
+  | FleetCommand;
 
 // ─── NATS Subject Map ────────────────────────────────────────
 
@@ -232,6 +247,7 @@ export const FLEET_SUBJECTS = {
   manifestDecision: (nodeId: NodeId) => `fleet.manifest.decision.${nodeId}`,
   nodeState: (nodeId: NodeId) => `fleet.node.state.${nodeId}`,
   taskCancel: (nodeId: NodeId) => `fleet.task.cancel.${nodeId}`,
+  command: (nodeId: NodeId) => `fleet.command.${nodeId}`,
   taskRequeue: 'fleet.task.requeue',
   syncStart: (nodeId: NodeId) => `fleet.sync.start.${nodeId}`,
   syncComplete: (nodeId: NodeId) => `fleet.sync.complete.${nodeId}`,

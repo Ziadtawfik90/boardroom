@@ -31,9 +31,12 @@ export const config = {
   natsEnabled: process.env['FLEET_NATS_ENABLED'] !== 'false',
 
   // FileSync — mode selection
-  syncMode: (process.env['FLEET_SYNC_MODE'] ?? 'git') as 'git' | 'rsync',
+  syncMode: (process.env['FLEET_SYNC_MODE'] ?? 'nats') as 'nats' | 'git' | 'rsync',
 
-  // Git sync (default — no SSH needed)
+  // NATS Object Store sync (default — no SSH, no git needed)
+  natsSyncBucket: process.env['FLEET_NATS_SYNC_BUCKET'] ?? 'fleet-workspaces',
+
+  // Git sync (alternative — no SSH needed)
   gitRemoteBase: process.env['FLEET_GIT_REMOTE_BASE'] ?? '',
   gitBranch: process.env['FLEET_GIT_BRANCH'] ?? 'main',
 
