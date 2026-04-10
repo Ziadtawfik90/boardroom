@@ -220,6 +220,24 @@ async function initNats(): Promise<void> {
 
     // Bridge: NATS events → WS broadcast + DB updates
     natsBridge = new NatsBridge(nc, queries, registry, (envelope) => wsServer.broadcast(envelope));
+    natsBridge.setOnAllTasksDone((discussionId) => {
+      // Build a summary of completed tasks for the debrief
+      const tasks = queries.listTasks({ status: 'done' }).filter(t => t.discussionId === discussionId);
+      const failed = queries.listTasks({ status: 'failed' }).filter(t => t.discussionId === discussionId);
+      const lines = ['TASK RESULTS — all assigned work is complete.\n'];
+      for (const t of tasks) {
+        lines.push(`[${t.assignee.toUpperCase()} ✓] ${t.title}`);
+        if (t.result) lines.push(`  Result: ${String(t.result).substring(0, 200)}`);
+      }
+      if (failed.length > 0) {
+        lines.push('\nFAILED:');
+        for (const t of failed) {
+          lines.push(`[${t.assignee.toUpperCase()} ✗] ${t.title}: ${t.error ?? 'unknown error'}`);
+        }
+      }
+      lines.push('\nReview these results. What worked? What needs follow-up? What should we do next?');
+      orchestrator.reconvene(discussionId, 'tasks-complete', lines.join('\n'));
+    });
     await natsBridge.start();
 
     // Health monitor: track alive/suspect/dead via heartbeats

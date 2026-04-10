@@ -33,6 +33,7 @@ interface OutputTracker {
 export class NatsBridge {
   private outputTrackers = new Map<string, OutputTracker>();
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+  private onAllTasksDone: ((discussionId: string) => void) | null = null;
 
   constructor(
     private nc: NatsConnection,
@@ -40,6 +41,11 @@ export class NatsBridge {
     private registry: AgentRegistry,
     private broadcast: BroadcastFn,
   ) {}
+
+  /** Register callback for when all tasks in a discussion complete */
+  setOnAllTasksDone(cb: (discussionId: string) => void): void {
+    this.onAllTasksDone = cb;
+  }
 
   async start(): Promise<void> {
     this.subscribeTaskAccepted();
@@ -153,6 +159,17 @@ export class NatsBridge {
 
       this.clearOutputTracker(data.taskId);
       log.info(`Task ${data.taskId} completed on ${data.nodeId}`);
+
+      // Check if all tasks for this discussion are done → trigger debrief
+      if (this.onAllTasksDone && task.discussionId) {
+        const remaining = this.queries.listTasks({ status: 'running' })
+          .concat(this.queries.listTasks({ status: 'approved' }))
+          .filter(t => t.discussionId === task.discussionId);
+        if (remaining.length === 0) {
+          log.info(`All tasks done for discussion ${task.discussionId} — triggering debrief`);
+          this.onAllTasksDone(task.discussionId);
+        }
+      }
     } else {
       const error = data.error ?? `Task failed (exit ${data.exitCode})`;
       this.queries.failTask(data.taskId, error);
