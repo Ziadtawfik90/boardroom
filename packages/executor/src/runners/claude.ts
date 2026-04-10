@@ -103,9 +103,11 @@ export async function runClaude(
     const npmDir = `${appData}\\npm`;
     const nodeModulesDir = `${npmDir}\\node_modules\\@anthropic-ai\\claude-code`;
     const { existsSync } = require('node:fs');
-    const cliPath = `${nodeModulesDir}\\cli.mjs`;
+    const cliPathJs = `${nodeModulesDir}\\cli.js`;
+    const cliPathMjs = `${nodeModulesDir}\\cli.mjs`;
+    const cliPath = existsSync(cliPathJs) ? cliPathJs : existsSync(cliPathMjs) ? cliPathMjs : null;
 
-    if (existsSync(cliPath)) {
+    if (cliPath) {
       claudeCmd = process.execPath; // node.exe
       claudeArgs = [cliPath, '-p', '--dangerously-skip-permissions', '--output-format', 'json'];
     } else {

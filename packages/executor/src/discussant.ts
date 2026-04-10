@@ -115,9 +115,11 @@ export class Discussant {
 
       if (process.platform === 'win32') {
         const appData = process.env['APPDATA'] ?? `C:\\Users\\${process.env['USERNAME'] ?? 'user'}\\AppData\\Roaming`;
-        const cliPath = `${appData}\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.mjs`;
         const { existsSync } = require('node:fs');
-        if (existsSync(cliPath)) {
+        const cliPathJs = `${appData}\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js`;
+        const cliPathMjs = `${appData}\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.mjs`;
+        const cliPath = existsSync(cliPathJs) ? cliPathJs : existsSync(cliPathMjs) ? cliPathMjs : null;
+        if (cliPath) {
           claudeCmd = process.execPath;
           claudeArgs = [cliPath, '--dangerously-skip-permissions'];
         } else {
@@ -131,7 +133,7 @@ export class Discussant {
 
       const child = spawn(claudeCmd, claudeArgs, {
         timeout: 90_000,
-        shell: process.platform !== 'win32',
+        shell: process.platform === 'win32' ? true : false,
         env: {
           ...process.env,
           TERM: 'dumb',
