@@ -55,6 +55,6 @@ export const config = {
 
   // AI Chairman
   chairmanEnabled: process.env.CHAIRMAN_ENABLED !== 'false',
-  chairmanModel: process.env.CHAIRMAN_MODEL ?? 'anthropic/claude-sonnet-4',
+  chairmanModel: process.env.CHAIRMAN_MODEL ?? 'claude-sonnet-4-20250514',
   chairmanMaxInterventions: parseInt(process.env.CHAIRMAN_MAX_INTERVENTIONS ?? '6', 10),
 } as const;

@@ -2,11 +2,11 @@
  * ChairmanSession — a persistent AI moderator for boardroom discussions.
  *
  * Spawned when a discussion starts, stays alive for the entire meeting.
- * Maintains full conversation context via OpenRouter API calls.
+ * Maintains full conversation context via direct Anthropic API calls.
  * Decides when to intervene, approves tasks, and controls flow.
  */
 
-import { callOpenRouterJSON } from '../ai/openrouter.js';
+import { callAnthropicJSON } from '../ai/anthropic.js';
 import { createEnvelope } from '../../../shared/src/protocol.js';
 import type { WsEnvelope } from '../../../shared/src/protocol.js';
 import type { Message, Task } from '../../../shared/src/types.js';
@@ -223,7 +223,7 @@ export class ChairmanSession {
         content: m.content,
       }));
 
-      const decision = await callOpenRouterJSON<ChairmanDecision>(
+      const decision = await callAnthropicJSON<ChairmanDecision>(
         this.config.model,
         CHAIRMAN_SYSTEM_PROMPT,
         messages,
