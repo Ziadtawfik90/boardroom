@@ -9,7 +9,8 @@ export declare const config: {
     readonly natsUrl: string;
     readonly natsToken: string;
     readonly natsEnabled: boolean;
-    readonly syncMode: "nats" | "git" | "rsync";
+    readonly syncMode: "nats" | "git" | "rsync" | "share";
+    readonly remoteShare: string;
     readonly natsSyncBucket: string;
     readonly gitRemoteBase: string;
     readonly gitBranch: string;

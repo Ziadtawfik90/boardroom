@@ -25,6 +25,8 @@ export const config = {
     natsEnabled: process.env['FLEET_NATS_ENABLED'] !== 'false',
     // FileSync — mode selection
     syncMode: (process.env['FLEET_SYNC_MODE'] ?? 'nats'),
+    // Share sync — UNC/mount path to ASUS's AI folder on this machine (e.g. \\192.168.50.1\AI)
+    remoteShare: process.env['FLEET_REMOTE_SHARE'] ?? '',
     // NATS Object Store sync (default — no SSH, no git needed)
     natsSyncBucket: process.env['FLEET_NATS_SYNC_BUCKET'] ?? 'fleet-workspaces',
     // Git sync (alternative — no SSH needed)

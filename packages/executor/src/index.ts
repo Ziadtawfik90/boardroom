@@ -11,6 +11,7 @@ import { startNatsHeartbeat } from './nats-heartbeat.js';
 import { FileSync } from './sync.js';
 import { GitSync } from './git-sync.js';
 import { NatsSync } from './nats-sync.js';
+import { ShareSync } from './share-sync.js';
 import { logger } from './logger.js';
 import type { WsEnvelope, TaskCreatedPayload, MessageNewPayload, DiscussionYourTurnPayload, DiscussionSoloAnalyzePayload } from '@boardroom/shared';
 import { FLEET_SUBJECTS, type FleetTaskDispatch, type FleetTaskAccepted, type FleetTaskResult, type FleetTaskOutput, type FleetTaskCancel, type FleetCommand, type NodeId } from '@boardroom/shared';
@@ -19,7 +20,7 @@ const conn = new Connection();
 const discussant = new Discussant(conn);
 
 let nc: NatsConnection | null = null;
-let fileSync: FileSync | GitSync | NatsSync | null = null;
+let fileSync: FileSync | GitSync | NatsSync | ShareSync | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 
 // --- NATS task handler ---
@@ -183,7 +184,15 @@ async function initNats(): Promise<void> {
     heartbeatTimer = startNatsHeartbeat(nc, config.agentId as NodeId, getActiveTaskCount);
 
     // Initialize file sync
-    if (config.syncMode === 'nats') {
+    if (config.syncMode === 'share') {
+      // Shared network drive — no copying, just rewrite hub paths to UNC/mount path
+      fileSync = new ShareSync({
+        hubPathPrefix: config.hubPathPrefix,
+        remoteShare: config.remoteShare,
+        isHub: config.isHub,
+      });
+      logger.info(`[sync] Using shared drive mode → ${config.remoteShare || '(hub, no rewrite)'}`);
+    } else if (config.syncMode === 'nats') {
       const natsSync = new NatsSync(
         nc,
         {

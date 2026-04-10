@@ -11,6 +11,7 @@ import { startNatsHeartbeat } from './nats-heartbeat.js';
 import { FileSync } from './sync.js';
 import { GitSync } from './git-sync.js';
 import { NatsSync } from './nats-sync.js';
+import { ShareSync } from './share-sync.js';
 import { logger } from './logger.js';
 import { FLEET_SUBJECTS } from '@boardroom/shared';
 const conn = new Connection();
@@ -164,7 +165,16 @@ async function initNats() {
         // Start heartbeat
         heartbeatTimer = startNatsHeartbeat(nc, config.agentId, getActiveTaskCount);
         // Initialize file sync
-        if (config.syncMode === 'nats') {
+        if (config.syncMode === 'share') {
+            // Shared network drive — no copying, just rewrite hub paths to UNC/mount path
+            fileSync = new ShareSync({
+                hubPathPrefix: config.hubPathPrefix,
+                remoteShare: config.remoteShare,
+                isHub: config.isHub,
+            });
+            logger.info(`[sync] Using shared drive mode → ${config.remoteShare || '(hub, no rewrite)'}`);
+        }
+        else if (config.syncMode === 'nats') {
             const natsSync = new NatsSync(nc, {
                 syncRoot: config.syncRoot,
                 hubPathPrefix: config.hubPathPrefix,

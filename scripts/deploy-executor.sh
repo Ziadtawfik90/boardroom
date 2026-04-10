@@ -28,6 +28,10 @@ declare -A SSH_ALIAS=( [water]="pc2" [steam]="pc3" )
 declare -A HOST_IP=( [water]="192.168.50.2" [steam]="100.122.142.104" )
 declare -A AGENT_ROLE=( [water]="The Heavy Lifter" [steam]="The Operator" )
 
+# UNC path to ASUS's D:\AI share from each PC
+# WATER uses LAN; STEAM uses ASUS's Windows Tailscale IP for SMB
+declare -A REMOTE_SHARE=( [water]="\\\\192.168.50.1\\AI" [steam]="\\\\100.119.103.67\\AI" )
+
 # Agent keys — must match what's in the server's .env
 # Read from server's .env if available, otherwise use defaults
 SERVER_ENV="$REPO_DIR/.env"
@@ -137,6 +141,8 @@ PKGJSON
     is_windows=true
   fi
 
+  local remote_share="${REMOTE_SHARE[$agent_id]}"
+
   # Create .env
   cat > "$tmpdir/.env" << ENVFILE
 # Boardroom Executor — ${agent_id^^}
@@ -153,13 +159,12 @@ FLEET_NATS_URL=${NATS_URL}
 FLEET_NATS_TOKEN=${NATS_TOKEN}
 FLEET_NATS_ENABLED=true
 
-# FileSync
+# FileSync — shared drive mode: all PCs work directly in ASUS D:\AI
+# ASUS must share D:\AI as a Windows network share named "AI"
 FLEET_IS_HUB=false
-FLEET_SYNC_ROOT=${sync_root}
-FLEET_HUB_SSH=pc1
+FLEET_SYNC_MODE=share
+FLEET_REMOTE_SHARE=${remote_share}
 FLEET_HUB_PATH_PREFIX=/mnt/d/AI/
-FLEET_SYNC_RETRIES=3
-FLEET_SYNC_TIMEOUT=30
 FLEET_MAX_TASKS=3
 ENVFILE
 
