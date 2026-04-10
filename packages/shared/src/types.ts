@@ -1,5 +1,5 @@
 export type AgentId = 'asus' | 'water' | 'steam';
-export type Sender = AgentId | 'user' | 'system' | 'oracle' | 'sage';
+export type Sender = AgentId | 'user' | 'system' | 'oracle' | 'sage' | 'chairman';
 export type AgentStatus = 'online' | 'offline' | 'busy';
 export type DiscussionStatus = 'active' | 'closed' | 'archived';
 export type TaskStatus = 'pending' | 'approved' | 'running' | 'done' | 'failed' | 'cancelled';

@@ -25,6 +25,7 @@ import { connect, type NatsConnection } from 'nats';
 import { NatsBridge } from './fleet/nats-bridge.js';
 import { FleetHealthMonitor } from './fleet/health-monitor.js';
 import { FleetFileLockManager } from './fleet/file-lock.js';
+import { ChairmanManager } from './chairman/manager.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,6 +116,18 @@ orchestrator.setDispatcher(dispatcher);
 orchestrator.setWorkspaceManager(workspaceManager);
 wsHandlers.setOrchestrator(orchestrator);
 
+// ---------- AI Chairman ----------
+
+const chairmanManager = new ChairmanManager(queries, discussionManager, dispatcher, (envelope) => {
+  wsServer.broadcast(envelope);
+});
+orchestrator.setChairmanManager(chairmanManager);
+if (config.chairmanEnabled) {
+  console.log(`[chairman] AI Chairman enabled (model: ${config.chairmanModel})`);
+} else {
+  console.log('[chairman] AI Chairman disabled');
+}
+
 // ---------- Board Secretary (Autonomous Governance) ----------
 
 const secretary = new BoardSecretary(queries, discussionManager, dispatcher, (envelope) => {
@@ -124,6 +137,7 @@ secretary.setReconveneHandler((discussionId, trigger, actionLog) => {
   orchestrator.reconvene(discussionId, trigger, actionLog);
 });
 secretary.setWorkspaceManager(workspaceManager);
+secretary.setChairmanManager(chairmanManager);
 wsHandlers.setSecretary(secretary);
 
 // ---------- Meeting Triggers ----------
@@ -283,6 +297,7 @@ async function shutdown(): Promise<void> {
   heartbeat.stop();
   sshHealth.stop();
   fleetHealthMonitor?.stop();
+  chairmanManager.closeAll();
   clearInterval(stuckTaskInterval);
 
   if (nc) {

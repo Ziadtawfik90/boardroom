@@ -6,6 +6,7 @@ import type { Queries } from '../db/queries.js';
 import type { DiscussionManager } from '../discussion/manager.js';
 import type { TaskDispatcher } from '../task/dispatcher.js';
 import type { WorkspaceManager } from '../workspace/manager.js';
+import type { ChairmanManager } from '../chairman/manager.js';
 import { config } from '../config.js';
 
 type BroadcastFn = (envelope: WsEnvelope) => void;
@@ -25,6 +26,7 @@ export class BoardSecretary {
   private reconveneCounts = new Map<string, number>();
   private onReconvene: ReconveneFn | null = null;
   private workspaceManager: WorkspaceManager | null = null;
+  private chairmanManager: ChairmanManager | null = null;
 
   constructor(
     private queries: Queries,
@@ -35,6 +37,10 @@ export class BoardSecretary {
 
   setWorkspaceManager(wm: WorkspaceManager): void {
     this.workspaceManager = wm;
+  }
+
+  setChairmanManager(cm: ChairmanManager): void {
+    this.chairmanManager = cm;
   }
 
   setReconveneHandler(fn: ReconveneFn): void {
@@ -126,6 +132,17 @@ export class BoardSecretary {
         'system',
       );
       this.broadcast(createEnvelope('message.new', { discussionId, message: sysMsg }, 'system'));
+
+      // Escalate to AI Chairman if active
+      if (this.chairmanManager) {
+        const session = this.chairmanManager.getSession(discussionId);
+        if (session) {
+          const actionLog = this.buildActionLogSummary(discussionId);
+          session.onEscalation(`Reconvene limit reached (${count} reconvenes). ${actionLog}`).catch(err => {
+            console.error('[secretary] Chairman escalation failed:', (err as Error).message);
+          });
+        }
+      }
       return;
     }
 

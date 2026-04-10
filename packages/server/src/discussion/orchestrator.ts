@@ -9,6 +9,7 @@ import type { TaskDispatcher } from '../task/dispatcher.js';
 import { getAdvisorResponse, getAdvisorTurnResponse, selectRelevantAdvisors } from '../ai/advisors.js';
 import { runClaudeOnPC } from '../task/ssh-runner.js';
 import type { WorkspaceManager } from '../workspace/manager.js';
+import type { ChairmanManager } from '../chairman/manager.js';
 import { config } from '../config.js';
 
 const LOCAL_AGENT_IDS: AgentId[] = ['asus', 'water', 'steam'];
@@ -63,6 +64,7 @@ export class DiscussionOrchestrator {
 
   private dispatcher: TaskDispatcher | null = null;
   private workspaceManager: WorkspaceManager | null = null;
+  private chairmanManager: ChairmanManager | null = null;
 
   constructor(
     private registry: AgentRegistry,
@@ -78,6 +80,18 @@ export class DiscussionOrchestrator {
 
   setWorkspaceManager(wm: WorkspaceManager): void {
     this.workspaceManager = wm;
+  }
+
+  setChairmanManager(cm: ChairmanManager): void {
+    this.chairmanManager = cm;
+  }
+
+  /** End the current discussion and clean up chairman session */
+  private endDiscussion(): void {
+    if (this.state && this.chairmanManager) {
+      this.chairmanManager.closeSession(this.state.discussionId);
+    }
+    this.state = null;
   }
 
   isActive(discussionId: string): boolean {
@@ -227,6 +241,13 @@ export class DiscussionOrchestrator {
     this.recentAgentMessages = [];
 
     console.log(`[orchestrator] Discussion started (type=${discussionType}, phase=${initialPhase}), agents: ${allAgents.join(', ')}`);
+
+    // Start AI Chairman session
+    if (this.chairmanManager) {
+      this.chairmanManager.startSession(discussionId, triggerMessage.content, brief?.text ?? '', brief ?? undefined).catch(err => {
+        console.error('[orchestrator] Failed to start chairman session:', (err as Error).message);
+      });
+    }
 
     if (initialPhase === 'solo') {
       // Send solo analyze to ALL agents simultaneously
@@ -386,9 +407,30 @@ export class DiscussionOrchestrator {
     // Recalculate agreement
     this.state.agreementScore = this.calculateAgreement();
 
+    // Feed message to AI Chairman
+    if (this.chairmanManager) {
+      const session = this.chairmanManager.getSession(this.state.discussionId);
+      if (session) {
+        // Build a synthetic message for the chairman
+        session.onMessage({
+          id: '', discussionId: this.state.discussionId,
+          sender: agentId as import('../../../shared/src/types.js').Sender,
+          content, type: 'message', parentId: null, metadata: null,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
+
     // Check if everyone in this cycle has spoken — advance phase
     const participants = this.getParticipants();
     if (this.state.spokenThisCycle.size >= participants.length) {
+      // Notify chairman of cycle completion before advancing
+      if (this.chairmanManager) {
+        const session = this.chairmanManager.getSession(this.state.discussionId);
+        session?.onCycleComplete(this.state.phase, this.state.agreementScore, this.state.turnCount).catch(err => {
+          console.error('[orchestrator] Chairman cycle evaluation failed:', (err as Error).message);
+        });
+      }
       this.maybeAdvancePhase();
     }
 
@@ -412,7 +454,7 @@ export class DiscussionOrchestrator {
       } else {
         // Everything looks good — discussion closes cleanly
         console.log(`[orchestrator] Review complete, no issues. Discussion closed.`);
-        this.state = null;
+        this.endDiscussion();
         return;
       }
     } else if (phase === 'positions') {
@@ -431,7 +473,7 @@ export class DiscussionOrchestrator {
       }).catch(err => {
         console.error(`[orchestrator] Task extraction failed:`, err);
       });
-      this.state = null;
+      this.endDiscussion();
       return;
     }
   }
@@ -451,9 +493,18 @@ export class DiscussionOrchestrator {
 
   private advanceTo(newPhase: DiscussionPhase): void {
     if (!this.state) return;
-    console.log(`[orchestrator] Phase: ${this.state.phase} → ${newPhase}`);
+    const fromPhase = this.state.phase;
+    console.log(`[orchestrator] Phase: ${fromPhase} → ${newPhase}`);
     this.state.phase = newPhase;
     this.state.spokenThisCycle.clear();
+
+    // Notify chairman of phase transition
+    if (this.chairmanManager) {
+      const session = this.chairmanManager.getSession(this.state.discussionId);
+      session?.onPhaseChange(fromPhase, newPhase).catch(err => {
+        console.error('[orchestrator] Chairman phase evaluation failed:', (err as Error).message);
+      });
+    }
   }
 
   private triggerVoteRound(): void {
@@ -559,7 +610,7 @@ export class DiscussionOrchestrator {
       }, 'system');
       this.broadcast(msgEnvelope);
 
-      this.state = null;
+      this.endDiscussion();
     };
 
     // Patch: intercept solo collection completion to tally
@@ -620,45 +671,64 @@ export class DiscussionOrchestrator {
       const round1 = tasks.filter(t => t.dependencies.length === 0);
       const later = tasks.filter(t => t.dependencies.length > 0);
 
-      // Auto-approve eligible tasks (consent agenda)
-      const autoApproved: string[] = [];
-      const needsApproval: string[] = [];
-
-      for (const task of tasks) {
-        if (this.taskPlanner!.autoApproveEligible(task)) {
-          this.queries!.approveTask(task.id, 'consent-agenda');
-          autoApproved.push(`- ${task.assignee.toUpperCase()}: ${task.title} [${task.risk}]`);
-        } else {
-          needsApproval.push(`- ${task.assignee.toUpperCase()}: ${task.title} [${task.risk}]`);
+      // If AI Chairman is active, delegate task approval to it
+      const chairmanSession = this.chairmanManager?.getSession(discussionId);
+      if (chairmanSession) {
+        // Post task summary for the record
+        const taskList = tasks.map(t => `- ${t.assignee.toUpperCase()}: ${t.title} [${t.risk}]`).join('\n');
+        let sysContent = `${tasks.length} task(s) proposed:\n${taskList}`;
+        if (later.length > 0) {
+          sysContent += `\n\n${later.length} task(s) queued for later rounds (waiting on dependencies).`;
         }
-      }
+        const sysMsg = this.discussionManager.addMessage(discussionId, 'system', sysContent, 'system');
+        this.broadcast(createEnvelope('message.new', { discussionId, message: sysMsg }, 'system'));
 
-      let sysContent = '';
-      if (autoApproved.length > 0) {
-        sysContent += `Consent agenda — ${autoApproved.length} task(s) auto-approved (low risk):\n${autoApproved.join('\n')}`;
-      }
-      if (needsApproval.length > 0) {
-        if (sysContent) sysContent += '\n\n';
-        sysContent += `${needsApproval.length} task(s) require chairman approval:\n${needsApproval.join('\n')}`;
-      }
-      if (later.length > 0) {
-        sysContent += `\n\n${later.length} task(s) queued for later rounds (waiting on dependencies).`;
-      }
+        // Delegate to chairman for approval
+        chairmanSession.onTasksProposed(tasks).catch(err => {
+          console.error('[orchestrator] Chairman task approval failed, falling back to consent agenda:', (err as Error).message);
+          // Fallback: auto-approve low-risk tasks
+          for (const task of tasks) {
+            if (this.taskPlanner!.autoApproveEligible(task)) {
+              this.queries!.approveTask(task.id, 'consent-agenda-fallback');
+            }
+          }
+        });
+      } else {
+        // No chairman — use consent agenda (auto-approve)
+        const autoApproved: string[] = [];
+        const needsApproval: string[] = [];
 
-      const sysMsg = this.discussionManager.addMessage(
-        discussionId,
-        'system',
-        sysContent,
-        'system',
-      );
-      this.broadcast(createEnvelope('message.new', { discussionId, message: sysMsg }, 'system'));
+        for (const task of tasks) {
+          if (this.taskPlanner!.autoApproveEligible(task)) {
+            this.queries!.approveTask(task.id, 'consent-agenda');
+            autoApproved.push(`- ${task.assignee.toUpperCase()}: ${task.title} [${task.risk}]`);
+          } else {
+            needsApproval.push(`- ${task.assignee.toUpperCase()}: ${task.title} [${task.risk}]`);
+          }
+        }
 
-      // Dispatch only round 1 tasks (no dependencies)
-      if (this.dispatcher) {
-        for (const task of round1) {
-          const updated = this.queries!.getTask(task.id);
-          if (updated?.status === 'approved') {
-            this.dispatcher.dispatchIfReady(updated);
+        let sysContent = '';
+        if (autoApproved.length > 0) {
+          sysContent += `Consent agenda — ${autoApproved.length} task(s) auto-approved (low risk):\n${autoApproved.join('\n')}`;
+        }
+        if (needsApproval.length > 0) {
+          if (sysContent) sysContent += '\n\n';
+          sysContent += `${needsApproval.length} task(s) require chairman approval:\n${needsApproval.join('\n')}`;
+        }
+        if (later.length > 0) {
+          sysContent += `\n\n${later.length} task(s) queued for later rounds (waiting on dependencies).`;
+        }
+
+        const sysMsg = this.discussionManager.addMessage(discussionId, 'system', sysContent, 'system');
+        this.broadcast(createEnvelope('message.new', { discussionId, message: sysMsg }, 'system'));
+
+        // Dispatch only round 1 tasks (no dependencies)
+        if (this.dispatcher) {
+          for (const task of round1) {
+            const updated = this.queries!.getTask(task.id);
+            if (updated?.status === 'approved') {
+              this.dispatcher.dispatchIfReady(updated);
+            }
           }
         }
       }
@@ -688,7 +758,7 @@ export class DiscussionOrchestrator {
       this.extractAndPostTasks().catch(err =>
         console.error('[orchestrator] Task extraction failed:', err),
       );
-      this.state = null;
+      this.endDiscussion();
       return;
     }
 
@@ -698,7 +768,7 @@ export class DiscussionOrchestrator {
 
     if (!nextAgent) {
       console.log(`[orchestrator] No available speaker, discussion ends`);
-      this.state = null;
+      this.endDiscussion();
       return;
     }
 

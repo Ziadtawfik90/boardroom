@@ -52,4 +52,9 @@ export const config = {
   natsUrl: process.env.NATS_URL ?? 'nats://localhost:4222',
   natsToken: process.env.NATS_AUTH_TOKEN ?? '',
   natsEnabled: process.env.NATS_ENABLED !== 'false',
+
+  // AI Chairman
+  chairmanEnabled: process.env.CHAIRMAN_ENABLED !== 'false',
+  chairmanModel: process.env.CHAIRMAN_MODEL ?? 'anthropic/claude-sonnet-4',
+  chairmanMaxInterventions: parseInt(process.env.CHAIRMAN_MAX_INTERVENTIONS ?? '6', 10),
 } as const;
