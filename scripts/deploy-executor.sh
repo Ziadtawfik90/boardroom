@@ -45,13 +45,14 @@ get_key() {
   fi
 }
 
-# ASUS Tailscale IP (server address for remote agents)
-ASUS_TS_IP="${ASUS_TAILSCALE_IP:-100.119.103.67}"
-ASUS_LAN_IP="${ASUS_LAN_IP:-192.168.50.1}"
+# ASUS IPs
+ASUS_TS_IP="${ASUS_TAILSCALE_IP:-100.119.103.67}"  # Windows Tailscale IP (for STEAM)
+ASUS_LAN_IP="${ASUS_LAN_IP:-192.168.50.1}"          # LAN IP (for WATER)
 
-# Prefer Tailscale for reliability, fallback to LAN
-SERVER_WS_URL="ws://${ASUS_TS_IP}:3101/ws"
-NATS_URL="nats://${ASUS_TS_IP}:4222"
+# Per-target server URLs — WATER uses LAN (faster, no Tailscale hop), STEAM uses Tailscale
+declare -A SERVER_URL_MAP=( [water]="ws://${ASUS_LAN_IP}:3101/ws" [steam]="ws://${ASUS_TS_IP}:3101/ws" )
+declare -A NATS_URL_MAP=( [water]="nats://${ASUS_LAN_IP}:4222" [steam]="nats://${ASUS_TS_IP}:4222" )
+
 NATS_TOKEN=$(get_key "NATS_AUTH_TOKEN" "")
 
 REMOTE_DIR="boardroom-agent"
@@ -77,6 +78,8 @@ deploy_to() {
   local ssh="${SSH_ALIAS[$agent_id]}"
   local role="${AGENT_ROLE[$agent_id]}"
   local agent_key
+  local SERVER_WS_URL="${SERVER_URL_MAP[$agent_id]}"
+  local NATS_URL="${NATS_URL_MAP[$agent_id]}"
 
   # Read agent key from server .env
   local key_var="${agent_id^^}_API_KEY"  # e.g. WATER_API_KEY
@@ -192,7 +195,12 @@ BATFILE
 
   # Step 5: Extract and install
   echo "[5/6] Installing on $ssh..."
-  ssh "$ssh" "cd $REMOTE_DIR && tar xzf boardroom-executor-${agent_id}.tar.gz && rm boardroom-executor-${agent_id}.tar.gz" 2>/dev/null
+  ssh "$ssh" "cd $REMOTE_DIR && tar xzf boardroom-executor-${agent_id}.tar.gz" 2>/dev/null
+  if [ "$is_windows" = true ]; then
+    ssh "$ssh" "cd $REMOTE_DIR && del boardroom-executor-${agent_id}.tar.gz" 2>/dev/null || true
+  else
+    ssh "$ssh" "cd $REMOTE_DIR && rm boardroom-executor-${agent_id}.tar.gz" 2>/dev/null || true
+  fi
 
   # Install dependencies
   ssh "$ssh" "cd $REMOTE_DIR && npm install --production 2>/dev/null" 2>/dev/null || true
@@ -216,7 +224,7 @@ BATFILE
   # Verify
   sleep 3
   local log_tail
-  log_tail=$(ssh "$ssh" "cd $REMOTE_DIR && tail -5 boardroom-${agent_id}.log 2>/dev/null" 2>/dev/null || echo "Could not read log")
+  log_tail=$(ssh "$ssh" "cd $REMOTE_DIR && powershell -NoProfile -Command \"if (Test-Path boardroom-${agent_id}.log) { Get-Content boardroom-${agent_id}.log -Tail 5 } else { 'no log yet' }\"" 2>/dev/null || echo "Could not read log")
 
   echo ""
   echo "  ${agent_id^^} deployment complete"
