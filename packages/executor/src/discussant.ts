@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import type { Connection } from './connection.js';
@@ -115,25 +116,24 @@ export class Discussant {
 
       if (process.platform === 'win32') {
         const appData = process.env['APPDATA'] ?? `C:\\Users\\${process.env['USERNAME'] ?? 'user'}\\AppData\\Roaming`;
-        const { existsSync } = require('node:fs');
         const cliPathJs = `${appData}\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js`;
         const cliPathMjs = `${appData}\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.mjs`;
         const cliPath = existsSync(cliPathJs) ? cliPathJs : existsSync(cliPathMjs) ? cliPathMjs : null;
         if (cliPath) {
           claudeCmd = process.execPath;
-          claudeArgs = [cliPath, '--dangerously-skip-permissions'];
+          claudeArgs = [cliPath, '-p', '--dangerously-skip-permissions'];
         } else {
           claudeCmd = `${appData}\\npm\\claude.cmd`;
-          claudeArgs = ['--dangerously-skip-permissions'];
+          claudeArgs = ['-p', '--dangerously-skip-permissions'];
         }
       } else {
         claudeCmd = process.env['CLAUDE_BIN'] || 'claude';
-        claudeArgs = ['--dangerously-skip-permissions'];
+        claudeArgs = ['-p', '--dangerously-skip-permissions'];
       }
 
       const child = spawn(claudeCmd, claudeArgs, {
         timeout: 90_000,
-        shell: process.platform === 'win32' ? true : false,
+        shell: false,
         env: {
           ...process.env,
           TERM: 'dumb',

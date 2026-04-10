@@ -1,4 +1,7 @@
 import { connect, type NatsConnection } from 'nats';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { config } from './config.js';
 import { Connection } from './connection.js';
 import { Discussant } from './discussant.js';
@@ -59,19 +62,19 @@ async function handleNatsTask(task: FleetTaskDispatch): Promise<void> {
     } catch (err) {
       logger.error(`[sync] Pull failed: ${(err as Error).message}`);
       // On Windows, Linux paths don't exist — use a local fallback
-      if (process.platform === 'win32' || !require('node:fs').existsSync(workDir)) {
+      if (process.platform === 'win32' || !existsSync(workDir)) {
         const fallback = process.platform === 'win32'
-          ? require('node:path').join(config.syncRoot, task.taskId)
+          ? join(config.syncRoot, task.taskId)
           : workDir;
-        try { require('node:fs').mkdirSync(fallback, { recursive: true }); } catch {}
+        try { mkdirSync(fallback, { recursive: true }); } catch {}
         workDir = fallback;
         logger.info(`[sync] Using local fallback workdir: ${workDir}`);
       }
     }
   } else if (process.platform === 'win32' && workDir.startsWith('/')) {
     // No fileSync but got a Linux path on Windows — use local dir
-    const fallback = require('node:path').join(process.cwd(), 'work', task.taskId);
-    try { require('node:fs').mkdirSync(fallback, { recursive: true }); } catch {}
+    const fallback = join(process.cwd(), 'work', task.taskId);
+    try { mkdirSync(fallback, { recursive: true }); } catch {}
     workDir = fallback;
     logger.info(`[sync] No sync, using local workdir: ${workDir}`);
   }
@@ -290,7 +293,7 @@ async function initNats(): Promise<void> {
               case 'update':
                 logger.info('[NATS] Self-updating: git pull + rebuild...');
                 try {
-                  const { execSync: exec } = require('node:child_process');
+                  const exec = execSync;
                   exec('git pull origin master', { cwd: process.cwd(), timeout: 30_000 });
                   exec('npm run build', { cwd: process.cwd(), timeout: 60_000 });
                   logger.info('[NATS] Update complete, restarting...');

@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
 
@@ -102,7 +104,6 @@ export async function runClaude(
     const appData = process.env['APPDATA'] ?? `C:\\Users\\${process.env['USERNAME'] ?? 'user'}\\AppData\\Roaming`;
     const npmDir = `${appData}\\npm`;
     const nodeModulesDir = `${npmDir}\\node_modules\\@anthropic-ai\\claude-code`;
-    const { existsSync } = require('node:fs');
     const cliPathJs = `${nodeModulesDir}\\cli.js`;
     const cliPathMjs = `${nodeModulesDir}\\cli.mjs`;
     const cliPath = existsSync(cliPathJs) ? cliPathJs : existsSync(cliPathMjs) ? cliPathMjs : null;
