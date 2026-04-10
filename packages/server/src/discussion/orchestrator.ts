@@ -611,6 +611,11 @@ export class DiscussionOrchestrator {
     }
 
     if (tasks.length > 0) {
+      // Broadcast each task to dashboard clients
+      for (const task of tasks) {
+        this.broadcast(createEnvelope('task.created', { task }, 'system'));
+      }
+
       // Separate round 1 tasks (no dependencies) from later rounds
       const round1 = tasks.filter(t => t.dependencies.length === 0);
       const later = tasks.filter(t => t.dependencies.length > 0);
