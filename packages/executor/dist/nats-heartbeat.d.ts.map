@@ -1,0 +1,1 @@
+{"version":3,"file":"nats-heartbeat.d.ts","sourceRoot":"","sources":["../src/nats-heartbeat.ts"],"names":[],"mappings":"AAAA;;;;GAIG;AAIH,OAAO,KAAK,EAAE,cAAc,EAAE,MAAM,MAAM,CAAC;AAC3C,OAAO,KAAK,EAAkB,MAAM,EAAE,MAAM,mBAAmB,CAAC;AAqEhE,wBAAgB,kBAAkB,CAChC,EAAE,EAAE,cAAc,EAClB,MAAM,EAAE,MAAM,EACd,cAAc,EAAE,MAAM,MAAM,EAC5B,OAAO,GAAE,MAAgB,GACxB,MAAM,CAAC,OAAO,CA2BhB"}
